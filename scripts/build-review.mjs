@@ -61,3 +61,45 @@ export function validateFinding(f, hunks) {
   if (!isCommentable(hunks, f.path, f.line)) return { ok: false, reason: 'out-of-diff' };
   return { ok: true };
 }
+
+const MARKER = '<!-- ai-pr-review-go -->';
+
+function stripSuggestion(body) {
+  return body.replace(/```suggestion[\s\S]*?```/gi, '_(suggestion omitted — low confidence)_');
+}
+function oneLine(s) {
+  return (s || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+}
+function renderCommentBody(f) {
+  let b = f.body || '';
+  if (f.confidence !== 'High') b = stripSuggestion(b);
+  const cat = f.category ? ` ${f.category}` : '';
+  return `**[${f.severity}]${cat}** — ${b}`;
+}
+
+export function buildReviewPayload(parsed, hunks) {
+  const comments = [];
+  const folded = [];
+  for (const f of parsed.findings) {
+    const v = validateFinding(f, hunks);
+    if (v.ok) {
+      const c = { path: f.path, line: f.line, side: 'RIGHT', body: renderCommentBody(f) };
+      if (f.start_line !== undefined && f.start_line !== null) {
+        c.start_line = f.start_line;
+        c.start_side = 'RIGHT';
+      }
+      comments.push(c);
+    } else {
+      folded.push(f);
+    }
+  }
+  let body = `${MARKER}\n\n## 🤖 AI Code Review (Go)\n\n${parsed.summary}\n`;
+  if (folded.length) {
+    body += `\n### Findings outside the diff\n`;
+    for (const f of folded) {
+      const cat = f.category ? ` ${f.category}` : '';
+      body += `- **[${f.severity}]${cat}** \`${f.path}:${f.line}\` — ${oneLine(f.body)}\n`;
+    }
+  }
+  return { body, event: 'COMMENT', comments };
+}

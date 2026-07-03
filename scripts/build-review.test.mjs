@@ -91,3 +91,46 @@ test('validateFinding rejects start_line out of diff', () => {
 test('validateFinding accepts a valid multi-line range', () => {
   assert.deepEqual(validateFinding({ ...base, start_line: 10, line: 12 }, HUNKS), { ok: true });
 });
+
+import { buildReviewPayload } from './build-review.mjs';
+
+test('buildReviewPayload splits inline vs folded and keeps the marker', () => {
+  const parsed = {
+    summary: 'Looks mostly good.',
+    findings: [
+      { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', category: 'Security', confidence: 'High', body: 'RLS bypass.' },
+      { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Low', category: 'Style', confidence: 'Low', body: 'nit' },
+    ],
+  };
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.event, 'COMMENT');
+  assert.equal(p.comments.length, 1);
+  assert.equal(p.comments[0].line, 11);
+  assert.match(p.body, /^<!-- ai-pr-review-go -->/);
+  assert.match(p.body, /Findings outside the diff/);
+  assert.match(p.body, /src\/db\/x\.ts:99/);
+});
+test('buildReviewPayload strips a suggestion block when confidence is not High', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'Low', confidence: 'Low',
+      body: 'try\n```suggestion\nconst x = 1;\n```' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.doesNotMatch(p.comments[0].body, /```suggestion/);
+});
+test('buildReviewPayload keeps a High-confidence suggestion block', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High',
+      body: 'fix\n```suggestion\nconst x = 1;\n```' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.match(p.comments[0].body, /```suggestion/);
+});
+test('buildReviewPayload sets start_side for multi-line comments', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', start_line: 10, line: 12, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'range' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments[0].start_line, 10);
+  assert.equal(p.comments[0].start_side, 'RIGHT');
+});
