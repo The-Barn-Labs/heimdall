@@ -7,19 +7,19 @@ test('parseCommand returns null for empty', () => {
 });
 
 test('parseCommand recognizes review', () => {
-  assert.equal(parseCommand('@heimdall review'), 'review');
+  assert.equal(parseCommand('@heim-dall review'), 'review');
 });
 
 test('parseCommand recognizes review deep (deep wins over review)', () => {
-  assert.equal(parseCommand('please @heimdall review deep now'), 'review-deep');
+  assert.equal(parseCommand('please @heim-dall review deep now'), 'review-deep');
 });
 
 test('parseCommand recognizes explain', () => {
-  assert.equal(parseCommand('@heimdall explain the RLS change'), 'explain');
+  assert.equal(parseCommand('@heim-dall explain the RLS change'), 'explain');
 });
 
 test('parseCommand is case-insensitive', () => {
-  assert.equal(parseCommand('@Heimdall REVIEW'), 'review');
+  assert.equal(parseCommand('@Heim-Dall REVIEW'), 'review');
 });
 
 test('parseCommand ignores unrelated mentions', () => {
@@ -44,17 +44,17 @@ test('pull_request synchronize does NOT run', () => {
 });
 
 test('issue_comment on non-PR does not run', () => {
-  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: false, commentBody: '@heimdall review' });
+  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: false, commentBody: '@heim-dall review' });
   assert.equal(r.run, false); assert.equal(r.reason, 'not-a-pr-comment');
 });
 
 test('issue_comment command on same-repo PR runs', () => {
-  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: true, isFork: false, commentBody: '@heimdall review deep' });
+  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: true, isFork: false, commentBody: '@heim-dall review deep' });
   assert.equal(r.run, true); assert.equal(r.command, 'review-deep');
 });
 
 test('issue_comment command on FORK PR is blocked', () => {
-  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: true, isFork: true, commentBody: '@heimdall review' });
+  const r = classifyTrigger({ eventName: 'issue_comment', isPullRequestComment: true, isFork: true, commentBody: '@heim-dall review' });
   assert.equal(r.run, false); assert.equal(r.reason, 'fork-comment-blocked');
 });
 
