@@ -138,6 +138,27 @@ jobs:
           permission-issues: write
           permission-checks: write
 
+      # Fast visual "I'm on it" ack (mirrors Gemini Code Assist's 👀ing),
+      # posted before the slower checkout/claude steps. React on the specific
+      # comment that triggered a request, or on the PR itself for
+      # pull_request/workflow_dispatch. Never fails the job — a reaction is a
+      # nicety, not load-bearing.
+      - name: Acknowledge with an eyes reaction
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.gate.outputs.pr }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "issue_comment" ] && [ -n "$COMMENT_ID" ]; then
+            gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes >/dev/null || true
+          else
+            gh api -X POST "repos/${REPO}/issues/${PR}/reactions" -f content=eyes >/dev/null || true
+          fi
+
       - name: Check out pinned PR head + capture diff
         if: ${{ steps.gate.outputs.run == 'true' }}
         env:
