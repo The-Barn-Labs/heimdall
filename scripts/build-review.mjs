@@ -103,3 +103,18 @@ export function buildReviewPayload(parsed, hunks) {
   }
   return { body, event: 'COMMENT', comments };
 }
+
+import { readFileSync, writeFileSync } from 'node:fs';
+
+export function runCli(rawPath, diffPath, outPayloadPath, outSummaryPath) {
+  const parsed = parseClaudeResult(readFileSync(rawPath, 'utf8'));
+  const hunks = parseDiffHunks(readFileSync(diffPath, 'utf8'));
+  const payload = buildReviewPayload(parsed, hunks);
+  writeFileSync(outPayloadPath, JSON.stringify(payload));
+  writeFileSync(outSummaryPath, payload.body);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const [raw, diff, outPayload, outSummary] = process.argv.slice(2);
+  runCli(raw, diff, outPayload, outSummary);
+}

@@ -134,3 +134,22 @@ test('buildReviewPayload sets start_side for multi-line comments', () => {
   assert.equal(p.comments[0].start_line, 10);
   assert.equal(p.comments[0].start_side, 'RIGHT');
 });
+
+import { runCli } from './build-review.mjs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+test('runCli writes a payload + summary from raw + diff', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rev-'));
+  const raw = JSON.stringify({ is_error: false, result: JSON.stringify({
+    summary: 'ok',
+    findings: [{ path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'bug' }],
+  })});
+  writeFileSync(join(dir, 'raw.json'), raw);
+  writeFileSync(join(dir, 'pr.diff'), SAMPLE_DIFF);
+  runCli(join(dir, 'raw.json'), join(dir, 'pr.diff'), join(dir, 'payload.json'), join(dir, 'summary.md'));
+  const payload = JSON.parse(readFileSync(join(dir, 'payload.json'), 'utf8'));
+  assert.equal(payload.comments.length, 1);
+  assert.match(readFileSync(join(dir, 'summary.md'), 'utf8'), /ai-pr-review-go/);
+});
