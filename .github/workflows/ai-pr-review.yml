@@ -7,6 +7,13 @@ on:
       pr_number:
         required: false
         type: string
+    secrets:
+      HEIMDALL_APP_ID:
+        required: true
+      HEIMDALL_PRIVATE_KEY:
+        required: true
+      OPENCODE_GO_KEY:
+        required: true
 
 # These govern the ambient default GITHUB_TOKEN used by the gate (read-only).
 # The privileged, target-scoped write token is minted separately by the App
