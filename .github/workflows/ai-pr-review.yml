@@ -43,14 +43,21 @@ jobs:
 
       # heimdall's OWN scripts. A reusable workflow does not get its own repo tree in the
       # workspace — GitHub loads only the workflow YAML — so gate.mjs / build-review.mjs
-      # must be checked out explicitly. Pin to github.workflow_sha: the exact commit this
-      # call resolved to (correct even when invoked via a moving @v1 alias). Placed in a
-      # sibling dir so it never collides with the target checkout above.
-      - name: Checkout heimdall scripts (pinned to this workflow's commit)
+      # must be checked out explicitly. There is no reliable context variable exposing
+      # "the ref this workflow_call was invoked at" from inside the callee: github.sha,
+      # github.ref, github.workflow_sha and github.workflow_ref all resolve to the
+      # CALLER's values, and github.job_workflow_sha/ref are empty for a job-level
+      # `uses:` call (verified empirically 2026-07-03 — this contradicts the docs'
+      # apparent implication and is a real GitHub Actions gap, not a misconfiguration).
+      # So this is hardcoded to heimdall's mainline branch name, matching whatever ref
+      # callers currently invoke this workflow at (@main during dogfood, later @v1 —
+      # keep this literal in sync with that alias when it changes in Task 12). Placed
+      # in a sibling dir so it never collides with the target checkout above.
+      - name: Checkout heimdall scripts (heimdall's own mainline — keep in sync with the caller ref)
         uses: actions/checkout@v4
         with:
           repository: The-Barn-Labs/heimdall
-          ref: ${{ github.workflow_sha }}
+          ref: main
           path: .heimdall
 
       # Gate FIRST, using only the ambient default GITHUB_TOKEN (read-only). No privileged
