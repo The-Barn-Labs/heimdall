@@ -1,0 +1,210 @@
+# .github/workflows/ai-pr-review.yml
+name: AI PR Review (Go)
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  go-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_BASE_URL: https://opencode.ai/zen/go
+      ANTHROPIC_MODEL: qwen3.7-plus
+      ANTHROPIC_SMALL_FAST_MODEL: minimax-m2.5
+      ANTHROPIC_DEFAULT_OPUS_MODEL: qwen3.7-max
+      ANTHROPIC_DEFAULT_SONNET_MODEL: qwen3.7-plus
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: minimax-m2.5
+      ANTHROPIC_DEFAULT_FABLE_MODEL: minimax-m3
+      REVIEW_MODEL_DEFAULT: qwen3.7-plus
+      REVIEW_MODEL_SENSITIVE: qwen3.7-max
+    steps:
+      - name: Checkout heimdall (scripts + workflow)
+        uses: actions/checkout@v4
+
+      - name: Mint minimal-scope App token
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HEIMDALL_APP_ID }}
+          private-key: ${{ secrets.HEIMDALL_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+          permission-contents: read
+          permission-issues: write
+          permission-checks: write
+
+      - name: Gather trigger facts + gate
+        id: gate
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          PR_FROM_INPUT: ${{ inputs.pr_number }}
+          PR_FROM_PR: ${{ github.event.pull_request.number }}
+          PR_FROM_ISSUE: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          PR="${PR_FROM_PR:-${PR_FROM_ISSUE:-$PR_FROM_INPUT}}"
+          if ! [[ "$PR" =~ ^[0-9]+$ ]]; then echo "::error::bad PR number"; exit 1; fi
+          # Fork + head SHA (pinned) via API.
+          IS_FORK=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.repo.full_name != .base.repo.full_name')
+          HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')
+          BASE=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.base.ref')
+          # Pure decision from the tested module.
+          DECISION=$(node -e '
+            import("./scripts/gate.mjs").then(g => {
+              const d = g.classifyTrigger({
+                eventName: process.env.EVENT_NAME,
+                action: process.env.ACTION,
+                isPullRequestComment: process.env.IS_PR_COMMENT === "true",
+                isFork: process.env.IS_FORK === "true",
+                commentBody: process.env.COMMENT_BODY || "",
+              });
+              process.stdout.write(JSON.stringify(d));
+            })' )
+          RUN=$(echo "$DECISION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).run')
+          COMMAND=$(echo "$DECISION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).command')
+          REASON=$(echo "$DECISION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).reason')
+          echo "gate reason=$REASON run=$RUN command=$COMMAND"
+          # Authorization for the comment-command path only.
+          if [ "$EVENT_NAME" = "issue_comment" ] && [ "$RUN" = "true" ]; then
+            PERM=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo none)
+            AUTH=$(node -e "import('./scripts/gate.mjs').then(g=>process.stdout.write(String(g.isAuthorized('${PERM}'))))")
+            if [ "$AUTH" != "true" ]; then
+              gh pr comment "$PR" --body "@${ACTOR} you need write access to request a review." || true
+              RUN=false; REASON=unauthorized
+            fi
+          fi
+          {
+            echo "run=$RUN"; echo "command=$COMMAND"; echo "pr=$PR";
+            echo "is_fork=$IS_FORK"; echo "head_sha=$HEAD_SHA"; echo "base=$BASE";
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned PR head + capture diff
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ steps.gate.outputs.pr }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
+          BASE: ${{ steps.gate.outputs.base }}
+        run: |
+          set -euo pipefail
+          git fetch origin "$HEAD_SHA" --depth=1 || git fetch origin "refs/pull/${PR}/head" --force
+          LIVE=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq '.head.sha')
+          if [ "$LIVE" != "$HEAD_SHA" ]; then
+            echo "::notice::head advanced ($HEAD_SHA -> $LIVE); reviewing the pinned SHA the requester saw."
+          fi
+          git checkout --force "$HEAD_SHA"
+          gh pr diff "$PR" > pr-review.diff
+          git show "origin/${BASE}:.ai-review/styleguide.md" > styleguide.md 2>/dev/null || : > styleguide.md
+          echo "diff_lines=$(wc -l < pr-review.diff)"
+
+      - name: Install Claude Code
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        run: npm install -g @anthropic-ai/claude-code@2.1.193
+
+      - name: Detect sensitive paths + pick engine
+        id: engine
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        env:
+          COMMAND: ${{ steps.gate.outputs.command }}
+        run: |
+          set -euo pipefail
+          SENSITIVE_RE='^(src/db/|src/actions/|src/middleware|middleware\.ts|src/lib/auth|src/lib/services/.*[Aa]uth)|(^|[^a-zA-Z])rls([^a-zA-Z]|$)|step-up|better-auth'
+          MODEL="$REVIEW_MODEL_DEFAULT"; NOTE=""
+          if grep -Eq "$SENSITIVE_RE" pr-review.diff; then MODEL="$REVIEW_MODEL_SENSITIVE"; NOTE="escalated"; fi
+          if [ "$COMMAND" = "review-deep" ]; then MODEL="$REVIEW_MODEL_SENSITIVE"; NOTE="deep"; fi
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "note=$NOTE" >> "$GITHUB_OUTPUT"
+
+      # NOTE (spec §8): `review deep` is gated to write/admin above. The optional
+      # per-day-per-PR rate limit on deep is a follow-on hardening — implement by
+      # counting this bot's prior "deep" summary comments in the last 24h before
+      # honoring `review-deep`, else downgrade to REVIEW_MODEL_DEFAULT. Deferred
+      # so v1 ships; the auth gate is the primary spend control.
+      - name: Run AI review (Go / claude -p)
+        id: review
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.OPENCODE_GO_KEY }}
+          ANTHROPIC_MODEL: ${{ steps.engine.outputs.model }}
+          PR: ${{ steps.gate.outputs.pr }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "::notice::no Go key (fork?); skipping."; exit 0; fi
+          if [ ! -s pr-review.diff ]; then echo "empty diff; nothing to review."; exit 0; fi
+          STYLE=""; [ -s styleguide.md ] && STYLE="Repo styleguide (authoritative, from base):\n$(cat styleguide.md)\n"
+          PROMPT="You are reviewing pull request #${PR}. The diff is in pr-review.diff — read it first, then read CLAUDE.md and any changed source files WITHIN THIS REPOSITORY ONLY for context (never read paths outside the repo working tree). Review deeply for: correctness/logic bugs; security (multi-tenant RLS, missing organization_id, queries outside withRLS/withRLSForOrg, auth & step-up, input validation); reliability/data; breaking changes & tests. Bias toward disclosure; skip pure style. Cite path:line for every finding and verify it exists. ${STYLE}
+          Output ONLY a single JSON object, no prose, no code fences, exactly:
+          {\"summary\":\"markdown verdict + coverage + counts\",\"findings\":[{\"path\":\"<repo-relative>\",\"line\":<new-file RIGHT-side line>,\"start_line\":<optional, < line>,\"side\":\"RIGHT\",\"severity\":\"High|Medium|Low\",\"category\":\"<short>\",\"confidence\":\"High|Medium|Low\",\"body\":\"markdown; a \`\`\`suggestion block only if you are highly confident\"}]}
+          Use new-file line numbers. If there are no issues, findings is []."
+          attempt=0; max=2; ok=false
+          while [ $attempt -lt $max ]; do
+            set +e
+            claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format json --max-turns 60 > raw.json 2> claude.err
+            code=$?
+            set -e
+            if [ $code -eq 0 ] && [ -s raw.json ] && [ "$(jq -r '.is_error // false' raw.json)" != "true" ]; then ok=true; break; fi
+            attempt=$((attempt+1)); [ $attempt -lt $max ] && sleep $((attempt*5))
+          done
+          if [ "$ok" != "true" ]; then echo "::error::claude failed after retries"; cat claude.err || true; exit 1; fi
+
+      - name: Build payload (tested module) or fall back
+        id: build
+        if: ${{ steps.gate.outputs.run == 'true' && hashFiles('raw.json') != '' }}
+        run: |
+          set -euo pipefail
+          if node scripts/build-review.mjs raw.json pr-review.diff review.payload.json review.summary.md; then
+            echo "mode=inline" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::JSON parse failed; falling back to summary comment."
+            jq -r '.result // ""' raw.json > review.summary.md || : > review.summary.md
+            if ! grep -qF '<!-- ai-pr-review-go -->' review.summary.md; then
+              { printf '<!-- ai-pr-review-go -->\n\n## 🤖 AI Code Review (Go)\n\n'; cat review.summary.md; } > review.summary.md.tmp
+              mv review.summary.md.tmp review.summary.md
+            fi
+            echo "mode=fallback" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post review (inline) or summary (fallback)
+        if: ${{ steps.gate.outputs.run == 'true' && hashFiles('review.summary.md') != '' }}
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          PR: ${{ steps.gate.outputs.pr }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ steps.build.outputs.mode }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- ai-pr-review-go -->"
+          # Minimize our prior inline review comments (COMMENT reviews can't be dismissed).
+          NODE_IDS=$(gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
+            --jq "[.[] | select(.body | contains(\"${MARKER}\")) | .node_id][]" 2>/dev/null || true)
+          for id in $NODE_IDS; do
+            # shellcheck disable=SC2016 # $id below is GraphQL variable syntax, not a shell var (the shell var is passed via -f id="$id")
+            gh api graphql -f query='mutation($id:ID!){minimizeComment(input:{subjectId:$id,classifier:OUTDATED}){clientMutationId}}' -f id="$id" >/dev/null || true
+          done
+          if [ "$MODE" = "inline" ] && [ -s review.payload.json ]; then
+            gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" --input review.payload.json >/dev/null
+            echo "Posted inline review."
+          fi
+          # Upsert the summary comment (also carries folded findings / fallback body).
+          existing=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            --jq "[.[] | select(.body | contains(\"${MARKER}\"))][0].id // empty")
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@review.summary.md" >/dev/null
+          else
+            gh pr comment "$PR" --body-file review.summary.md
+          fi
