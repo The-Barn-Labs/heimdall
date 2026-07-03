@@ -234,9 +234,15 @@ jobs:
         run: |
           set -euo pipefail
           MARKER="<!-- ai-pr-review-go -->"
-          # Minimize our prior inline review comments (COMMENT reviews can't be dismissed).
+          # Minimize our prior inline review comments (COMMENT reviews can't be
+          # dismissed). Individual inline comments never carry MARKER — only the
+          # top-level review/summary body does (renderCommentBody in
+          # build-review.mjs prepends just "[severity] category", not the
+          # marker) — so a marker-based select() here always returns zero
+          # matches. Filter by the bot's own login instead. Bug found via live
+          # dogfood: a re-request left every prior finding un-minimized.
           NODE_IDS=$(gh api "repos/${REPO}/pulls/${PR}/comments" --paginate \
-            --jq "[.[] | select(.body | contains(\"${MARKER}\")) | .node_id][]" 2>/dev/null || true)
+            --jq '[.[] | select(.user.login == "heim-dall[bot]") | .node_id][]' 2>/dev/null || true)
           for id in $NODE_IDS; do
             # shellcheck disable=SC2016 # $id below is GraphQL variable syntax, not a shell var (the shell var is passed via -f id="$id")
             gh api graphql -f query='mutation($id:ID!){minimizeComment(input:{subjectId:$id,classifier:OUTDATED}){clientMutationId}}' -f id="$id" >/dev/null || true
