@@ -31,3 +31,38 @@ test('parseClaudeResult throws when result is not our shape', () => {
 test('parseClaudeResult throws on non-JSON result', () => {
   assert.throws(() => parseClaudeResult(JSON.stringify({ result: 'I could not comply' })));
 });
+
+import { parseDiffHunks, isCommentable } from './build-review.mjs';
+
+const SAMPLE_DIFF = `diff --git a/src/db/x.ts b/src/db/x.ts
+--- a/src/db/x.ts
++++ b/src/db/x.ts
+@@ -10,3 +10,4 @@ context
+ unchanged
++added line
+ unchanged
+ unchanged
+diff --git a/src/gone.ts b/src/gone.ts
+--- a/src/gone.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-deleted
+-deleted
+`;
+
+test('parseDiffHunks captures RIGHT-side ranges for modified files', () => {
+  const h = parseDiffHunks(SAMPLE_DIFF);
+  assert.deepEqual(h.get('src/db/x.ts'), [[10, 13]]);
+});
+
+test('parseDiffHunks skips deleted files (+++ /dev/null)', () => {
+  const h = parseDiffHunks(SAMPLE_DIFF);
+  assert.equal(h.has('src/gone.ts'), false);
+});
+
+test('isCommentable is true inside a hunk, false outside', () => {
+  const h = parseDiffHunks(SAMPLE_DIFF);
+  assert.equal(isCommentable(h, 'src/db/x.ts', 11), true);
+  assert.equal(isCommentable(h, 'src/db/x.ts', 99), false);
+  assert.equal(isCommentable(h, 'unknown.ts', 11), false);
+});
