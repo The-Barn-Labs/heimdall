@@ -63,6 +63,18 @@ git tag -f v1 v1.2.3 && git push -f origin v1
 Callers pinned to `@v1` pick it up automatically. Breaking changes: cut `v2`; callers migrate
 deliberately by changing their own `@v1` → `@v2`.
 
+> ⚠️ **Re-tag `v1` immediately after every commit that touches `scripts/*.mjs` or the workflow
+> itself — even mid-debugging a live issue.** The self-checkout of this repo's own scripts
+> (`ref: main` in `ai-pr-review.yml`) intentionally tracks `main`, not `v1` — that's what lets you
+> dogfood a fix via a caller pinned to `@main` before cutting a release. But it means `main` and
+> `v1` can silently drift apart: a caller pinned to `@v1` runs whatever workflow YAML `v1` resolved
+> to, while `main`'s self-checkout step (baked into that same YAML) always fetches the *current*
+> `main` scripts — if a later commit to `main` changes their behavior before `v1` is re-tagged,
+> `@v1` callers get an inconsistent pairing of old YAML + newer scripts. Found the hard way: several
+> commits landed on `main` here while chasing live bugs before `v1` was re-tagged, so verification
+> runs against `@v1` were silently testing stale code. Treat "re-tag v1" as part of the fix, not a
+> separate follow-up step.
+
 ## Design docs
 
 Design and planning for heimdall live **in this repo**, not in the org's `dev-playbook` — see
