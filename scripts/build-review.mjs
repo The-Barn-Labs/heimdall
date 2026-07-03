@@ -14,7 +14,15 @@ export function parseClaudeResult(rawStdout) {
   if (typeof resultStr !== 'string' || resultStr.length === 0) {
     throw new Error('envelope has no .result string');
   }
-  const obj = JSON.parse(stripFences(resultStr).trim()); // throws on non-JSON result
+  // Prefer parsing the result as-is: the common case is unfenced raw JSON,
+  // which may itself contain embedded code fences inside a finding's `body`
+  // text. Only fall back to fence-stripping if direct parsing fails.
+  let obj;
+  try {
+    obj = JSON.parse(resultStr.trim());
+  } catch {
+    obj = JSON.parse(stripFences(resultStr)); // throws on non-JSON result
+  }
   if (!obj || typeof obj !== 'object' || typeof obj.summary !== 'string' || !Array.isArray(obj.findings)) {
     throw new Error('result is not {summary, findings[]}');
   }

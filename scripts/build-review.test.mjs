@@ -32,6 +32,18 @@ test('parseClaudeResult throws on non-JSON result', () => {
   assert.throws(() => parseClaudeResult(JSON.stringify({ result: 'I could not comply' })));
 });
 
+test('parseClaudeResult parses unfenced JSON whose finding body embeds its own code fence', () => {
+  // A finding's `body` can legitimately contain a ```suggestion/```yaml example.
+  // The outer result itself is unfenced raw JSON — stripFences must not be
+  // triggered at all here (or, if it is, must not grab the inner fence).
+  const inner = {
+    summary: 's',
+    findings: [{ path: 'a.ts', line: 1, severity: 'Low', body: 'try this:\n```yaml\nif: true\n```' }],
+  };
+  const envelope = JSON.stringify({ is_error: false, result: JSON.stringify(inner) });
+  assert.deepEqual(parseClaudeResult(envelope), inner);
+});
+
 import { parseDiffHunks, isCommentable, validateFinding } from './build-review.mjs';
 
 const SAMPLE_DIFF = `diff --git a/src/db/x.ts b/src/db/x.ts
