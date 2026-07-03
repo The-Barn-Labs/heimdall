@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripFences, parseClaudeResult } from './build-review.mjs';
+import { stripFences, parseClaudeResult, sanitizeControlChars } from './build-review.mjs';
 
 test('stripFences unwraps a ```json fence', () => {
   assert.equal(stripFences('prefix\n```json\n{"a":1}\n```\nsuffix').trim(), '{"a":1}');
@@ -42,6 +42,40 @@ test('parseClaudeResult parses unfenced JSON whose finding body embeds its own c
   };
   const envelope = JSON.stringify({ is_error: false, result: JSON.stringify(inner) });
   assert.deepEqual(parseClaudeResult(envelope), inner);
+});
+
+test('sanitizeControlChars escapes a raw newline inside a string value', () => {
+  assert.equal(sanitizeControlChars('{"a":"line one\nline two"}'), '{"a":"line one\\nline two"}');
+});
+
+test('sanitizeControlChars escapes raw tab and carriage return inside a string value', () => {
+  assert.equal(sanitizeControlChars('{"a":"x\ty\rz"}'), '{"a":"x\\ty\\rz"}');
+});
+
+test('sanitizeControlChars preserves whitespace between tokens (pretty-printed JSON)', () => {
+  const pretty = '{\n  "summary": "ok",\n  "findings": []\n}';
+  assert.equal(sanitizeControlChars(pretty), pretty);
+});
+
+test('sanitizeControlChars does not get confused by an escaped quote inside a string', () => {
+  // The \" here does not end the string, so the following raw newline is
+  // still INSIDE the string and must still be escaped.
+  const broken = '{"a":"she said \\"hi\\"\nthen left"}';
+  const out = sanitizeControlChars(broken);
+  assert.doesNotThrow(() => JSON.parse(out));
+  assert.equal(JSON.parse(out).a, 'she said "hi"\nthen left');
+});
+
+test('parseClaudeResult sanitizes a raw control character inside a JSON string value', () => {
+  // Simulates a real production failure: the model emitted an actual raw
+  // newline byte inside a string value instead of the escaped \n sequence --
+  // invalid per the JSON spec (JSON.parse throws "Bad control character in
+  // string literal"), but a common LLM mistake.
+  const brokenResult = '{"summary":"line one\nline two","findings":[]}';
+  const envelope = JSON.stringify({ is_error: false, result: brokenResult });
+  const parsed = parseClaudeResult(envelope);
+  assert.equal(parsed.summary, 'line one\nline two');
+  assert.deepEqual(parsed.findings, []);
 });
 
 import { parseDiffHunks, isCommentable, validateFinding } from './build-review.mjs';

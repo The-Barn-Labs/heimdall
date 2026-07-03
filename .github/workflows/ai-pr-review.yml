@@ -216,7 +216,7 @@ jobs:
           PROMPT="You are reviewing pull request #${PR}. The diff is in pr-review.diff — read it first, then read CLAUDE.md and any changed source files WITHIN THIS REPOSITORY ONLY for context (never read paths outside the repo working tree). Review deeply for: correctness/logic bugs; security (multi-tenant RLS, missing organization_id, queries outside withRLS/withRLSForOrg, auth & step-up, input validation); reliability/data; breaking changes & tests. Bias toward disclosure; skip pure style. Cite path:line for every finding and verify it exists. ${STYLE}
           Output ONLY a single JSON object, no prose, no code fences, exactly:
           {\"summary\":\"markdown verdict + coverage + counts\",\"findings\":[{\"path\":\"<repo-relative>\",\"line\":<new-file RIGHT-side line>,\"start_line\":<optional, < line>,\"side\":\"RIGHT\",\"severity\":\"High|Medium|Low\",\"category\":\"<short>\",\"confidence\":\"High|Medium|Low\",\"body\":\"markdown; a \`\`\`suggestion block only if you are highly confident\"}]}
-          Use new-file line numbers. If there are no issues, findings is []."
+          Use new-file line numbers. Escape newlines and other control characters within string values as \\n etc — never a literal line break inside a string. If there are no issues, findings is []."
           attempt=0; max=2; ok=false
           while [ $attempt -lt $max ]; do
             set +e

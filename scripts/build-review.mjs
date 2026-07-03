@@ -7,6 +7,42 @@ export function stripFences(s) {
   return s;
 }
 
+const ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\b': '\\b', '\f': '\\f' };
+
+// Escape raw (unescaped) control characters (0x00-0x1F) that appear INSIDE a
+// JSON string literal -- invalid per the JSON spec, but a common LLM mistake
+// (emitting a literal newline instead of the \n escape sequence). Control
+// characters used as insignificant whitespace BETWEEN tokens (e.g. in
+// pretty-printed JSON) are left untouched -- only tracks in/out of a string
+// literal, toggled by unescaped double-quotes.
+export function sanitizeControlChars(s) {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (const ch of s) {
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+      } else if (ch === '\\') {
+        out += ch;
+        escaped = true;
+      } else if (ch === '"') {
+        out += ch;
+        inString = false;
+      } else if (ch.charCodeAt(0) < 0x20) {
+        out += ESCAPES[ch] || `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`;
+      } else {
+        out += ch;
+      }
+    } else {
+      if (ch === '"') inString = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
 export function parseClaudeResult(rawStdout) {
   const envelope = JSON.parse(rawStdout); // throws on non-JSON envelope
   if (envelope.is_error) throw new Error('claude reported is_error');
@@ -16,12 +52,15 @@ export function parseClaudeResult(rawStdout) {
   }
   // Prefer parsing the result as-is: the common case is unfenced raw JSON,
   // which may itself contain embedded code fences inside a finding's `body`
-  // text. Only fall back to fence-stripping if direct parsing fails.
+  // text. Only fall back to fence-stripping if direct parsing fails. Raw
+  // control characters inside string values (another common LLM mistake) are
+  // sanitized up front, before either parse attempt.
+  const sanitized = sanitizeControlChars(resultStr);
   let obj;
   try {
-    obj = JSON.parse(resultStr.trim());
+    obj = JSON.parse(sanitized.trim());
   } catch {
-    obj = JSON.parse(stripFences(resultStr)); // throws on non-JSON result
+    obj = JSON.parse(stripFences(sanitized)); // throws on non-JSON result
   }
   if (!obj || typeof obj !== 'object' || typeof obj.summary !== 'string' || !Array.isArray(obj.findings)) {
     throw new Error('result is not {summary, findings[]}');
