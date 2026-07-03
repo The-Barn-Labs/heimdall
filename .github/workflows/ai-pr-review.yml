@@ -200,10 +200,6 @@ jobs:
           done
           if [ "$ok" != "true" ]; then echo "::error::claude failed after retries"; cat claude.err || true; exit 1; fi
 
-      - name: DEBUG dump raw.json (temporary — remove after diagnosis)
-        if: always() && hashFiles('raw.json') != ''
-        run: base64 -i raw.json
-
       - name: Build payload (tested module) or fall back
         id: build
         if: ${{ steps.gate.outputs.run == 'true' && hashFiles('raw.json') != '' }}
