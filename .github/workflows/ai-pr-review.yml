@@ -8,8 +8,15 @@ on:
         required: false
         type: string
 
+# These govern the ambient default GITHUB_TOKEN used by the gate (read-only).
+# The privileged, target-scoped write token is minted separately by the App
+# (see "Mint minimal-scope App token") only after the gate authorizes the run.
+#   contents: read       -> checkout of target base + heimdall scripts, PR-head fetch
+#   pull-requests: read  -> gate's `gh api repos/{owner}/{repo}/pulls/{n}`
+# (`collaborators/{user}/permission` needs only Metadata:read, always granted.)
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   go-review:
@@ -26,26 +33,33 @@ jobs:
       REVIEW_MODEL_DEFAULT: qwen3.7-plus
       REVIEW_MODEL_SENSITIVE: qwen3.7-max
     steps:
-      - name: Checkout heimdall (scripts + workflow)
+      # Target repo (the caller). For a workflow_call reusable workflow, actions/checkout
+      # with no `repository:` defaults to github.repository -> the CALLER's repo (NOT
+      # heimdall). That is what we want here: it provides the PR's base tree and the
+      # `origin` remote the pinned-head fetch later relies on. This is the trusted base
+      # branch, not the untrusted PR head (which is fetched only after the gate).
+      - name: Checkout target repo (PR base + origin)
         uses: actions/checkout@v4
 
-      - name: Mint minimal-scope App token
-        id: token
-        uses: actions/create-github-app-token@v1
+      # heimdall's OWN scripts. A reusable workflow does not get its own repo tree in the
+      # workspace — GitHub loads only the workflow YAML — so gate.mjs / build-review.mjs
+      # must be checked out explicitly. Pin to github.workflow_sha: the exact commit this
+      # call resolved to (correct even when invoked via a moving @v1 alias). Placed in a
+      # sibling dir so it never collides with the target checkout above.
+      - name: Checkout heimdall scripts (pinned to this workflow's commit)
+        uses: actions/checkout@v4
         with:
-          app-id: ${{ secrets.HEIMDALL_APP_ID }}
-          private-key: ${{ secrets.HEIMDALL_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-pull-requests: write
-          permission-contents: read
-          permission-issues: write
-          permission-checks: write
+          repository: The-Barn-Labs/heimdall
+          ref: ${{ github.workflow_sha }}
+          path: .heimdall
 
+      # Gate FIRST, using only the ambient default GITHUB_TOKEN (read-only). No privileged
+      # App token is minted, and the untrusted PR head is not checked out, until this step
+      # authorizes the run — "block BEFORE minting a token or checking out head."
       - name: Gather trigger facts + gate
         id: gate
         env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           COMMENT_BODY: ${{ github.event.comment.body }}
@@ -65,7 +79,7 @@ jobs:
           BASE=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.base.ref')
           # Pure decision from the tested module.
           DECISION=$(node -e '
-            import("./scripts/gate.mjs").then(g => {
+            import("./.heimdall/scripts/gate.mjs").then(g => {
               const d = g.classifyTrigger({
                 eventName: process.env.EVENT_NAME,
                 action: process.env.ACTION,
@@ -82,7 +96,7 @@ jobs:
           # Authorization for the comment-command path only.
           if [ "$EVENT_NAME" = "issue_comment" ] && [ "$RUN" = "true" ]; then
             PERM=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo none)
-            AUTH=$(node -e "import('./scripts/gate.mjs').then(g=>process.stdout.write(String(g.isAuthorized('${PERM}'))))")
+            AUTH=$(node -e "import('./.heimdall/scripts/gate.mjs').then(g=>process.stdout.write(String(g.isAuthorized('${PERM}'))))")
             if [ "$AUTH" != "true" ]; then
               gh pr comment "$PR" --body "@${ACTOR} you need write access to request a review." || true
               RUN=false; REASON=unauthorized
@@ -92,6 +106,23 @@ jobs:
             echo "run=$RUN"; echo "command=$COMMAND"; echo "pr=$PR";
             echo "is_fork=$IS_FORK"; echo "head_sha=$HEAD_SHA"; echo "base=$BASE";
           } >> "$GITHUB_OUTPUT"
+
+      # Mint the privileged, target-scoped write token ONLY after the gate has authorized
+      # the run. An unauthorized or fork-originated request is rejected above (run=false)
+      # before any write-capable token exists.
+      - name: Mint minimal-scope App token
+        id: token
+        if: ${{ steps.gate.outputs.run == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HEIMDALL_APP_ID }}
+          private-key: ${{ secrets.HEIMDALL_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+          permission-contents: read
+          permission-issues: write
+          permission-checks: write
 
       - name: Check out pinned PR head + capture diff
         if: ${{ steps.gate.outputs.run == 'true' }}
@@ -167,7 +198,7 @@ jobs:
         if: ${{ steps.gate.outputs.run == 'true' && hashFiles('raw.json') != '' }}
         run: |
           set -euo pipefail
-          if node scripts/build-review.mjs raw.json pr-review.diff review.payload.json review.summary.md; then
+          if node .heimdall/scripts/build-review.mjs raw.json pr-review.diff review.payload.json review.summary.md; then
             echo "mode=inline" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::JSON parse failed; falling back to summary comment."
