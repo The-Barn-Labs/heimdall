@@ -1,11 +1,71 @@
 # heimdall
 
-Shared, versioned CI for the org. Currently: the AI PR reviewer.
+Shared, versioned CI for The-Barn-Labs org. Currently: an App-identity AI PR reviewer
+(`heim-dall[bot]`) that posts line-anchored inline review comments. Live at `v1`, adopted by
+File Valet.
+
+See [ROADMAP.md](ROADMAP.md) for known limitations and planned future work (Hermes token broker,
+more repos, `review deep` rate limiting, etc.).
 
 ## Consuming the reviewer
-Add `.github/workflows/ai-review.yml` to your repo (see the playbook asset) and pin `@v1`.
+
+Add a thin caller to your repo as `.github/workflows/ai-review.yml`:
+
+```yaml
+name: AI Review
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number: { description: 'PR number', required: true, type: string }
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: ${{ github.actor != 'heim-dall[bot]' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  review:
+    if: ${{ (github.event_name != 'issue_comment' || contains(github.event.comment.body, '@heim-dall')) && github.event.pull_request.draft != true && github.actor != 'dependabot[bot]' }}
+    uses: The-Barn-Labs/heimdall/.github/workflows/ai-pr-review.yml@v1
+    secrets:
+      HEIMDALL_APP_ID: ${{ secrets.HEIMDALL_APP_ID }}
+      HEIMDALL_PRIVATE_KEY: ${{ secrets.HEIMDALL_PRIVATE_KEY }}
+      OPENCODE_GO_KEY: ${{ secrets.OPENCODE_GO_KEY }}
+    with:
+      pr_number: ${{ inputs.pr_number }}
+```
+
+- **Secrets:** `HEIMDALL_APP_ID` / `HEIMDALL_PRIVATE_KEY` (the org's `heim-dall` GitHub App) and
+  `OPENCODE_GO_KEY` must be visible to the consuming repo. On GitHub Free, org-level secrets only
+  reach *public* repos — for a private repo, set these as **repo-level** secrets instead (no code
+  change needed either way; `secrets:` mappings resolve repo-level secrets the same way).
+- **Permissions block is not optional.** If the caller omits it, GitHub rejects the cross-repo
+  `workflow_call` outright — `startup_failure`, zero jobs, no diagnostic.
+- **Commands:** `@heim-dall review` (default), `@heim-dall review deep` (forces the escalated model
+  tier), `@heim-dall explain <topic>`.
 
 ## Releasing
+
 Edit `.github/workflows/ai-pr-review.yml` or `scripts/*.mjs`, then:
-`git tag v1.2.3 && git push origin v1.2.3 && git tag -f v1 v1.2.3 && git push -f origin v1`
-Callers pinned to `@v1` pick it up. Breaking changes: cut `v2`, migrate callers deliberately.
+
+```bash
+git tag v1.2.3 && git push origin v1.2.3
+git tag -f v1 v1.2.3 && git push -f origin v1
+```
+
+Callers pinned to `@v1` pick it up automatically. Breaking changes: cut `v2`; callers migrate
+deliberately by changing their own `@v1` → `@v2`.
+
+## Design docs
+
+Design and planning for heimdall live **in this repo**, not in the org's `dev-playbook` — see
+`docs/superpowers/specs/` and `docs/superpowers/plans/`, and [ROADMAP.md](ROADMAP.md) for what's
+next. Proven changes get harvested outward into `dev-playbook`'s `assets/ci/ai-review/` as a
+genericized, portable update once dogfooded here.
