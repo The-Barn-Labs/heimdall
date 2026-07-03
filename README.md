@@ -32,7 +32,7 @@ permissions:
 
 jobs:
   review:
-    if: ${{ (github.event_name != 'issue_comment' || contains(github.event.comment.body, '@heim-dall')) && github.event.pull_request.draft != true && github.actor != 'dependabot[bot]' }}
+    if: ${{ (github.event_name != 'issue_comment' || contains(github.event.comment.body, '@heim-dall')) && github.event.pull_request.draft != true && github.actor != 'dependabot[bot]' && github.actor != 'heim-dall[bot]' }}
     uses: The-Barn-Labs/heimdall/.github/workflows/ai-pr-review.yml@v1
     secrets:
       HEIMDALL_APP_ID: ${{ secrets.HEIMDALL_APP_ID }}
