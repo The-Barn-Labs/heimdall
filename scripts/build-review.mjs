@@ -46,3 +46,18 @@ export function isCommentable(hunks, path, line) {
   if (!ranges) return false;
   return ranges.some(([s, e]) => line >= s && line <= e);
 }
+
+const SEVERITIES = new Set(['High', 'Medium', 'Low']);
+
+export function validateFinding(f, hunks) {
+  if (!f || typeof f.path !== 'string' || !Number.isInteger(f.line)) return { ok: false, reason: 'shape' };
+  if (f.side !== undefined && f.side !== 'RIGHT') return { ok: false, reason: 'side' };
+  if (!SEVERITIES.has(f.severity)) return { ok: false, reason: 'severity' };
+  if (f.confidence !== undefined && !SEVERITIES.has(f.confidence)) return { ok: false, reason: 'confidence' };
+  if (f.start_line !== undefined && f.start_line !== null) {
+    if (!Number.isInteger(f.start_line) || f.start_line >= f.line) return { ok: false, reason: 'range' };
+    if (!isCommentable(hunks, f.path, f.start_line)) return { ok: false, reason: 'start-out-of-diff' };
+  }
+  if (!isCommentable(hunks, f.path, f.line)) return { ok: false, reason: 'out-of-diff' };
+  return { ok: true };
+}

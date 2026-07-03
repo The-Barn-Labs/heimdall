@@ -32,7 +32,7 @@ test('parseClaudeResult throws on non-JSON result', () => {
   assert.throws(() => parseClaudeResult(JSON.stringify({ result: 'I could not comply' })));
 });
 
-import { parseDiffHunks, isCommentable } from './build-review.mjs';
+import { parseDiffHunks, isCommentable, validateFinding } from './build-review.mjs';
 
 const SAMPLE_DIFF = `diff --git a/src/db/x.ts b/src/db/x.ts
 --- a/src/db/x.ts
@@ -65,4 +65,29 @@ test('isCommentable is true inside a hunk, false outside', () => {
   assert.equal(isCommentable(h, 'src/db/x.ts', 11), true);
   assert.equal(isCommentable(h, 'src/db/x.ts', 99), false);
   assert.equal(isCommentable(h, 'unknown.ts', 11), false);
+});
+
+const HUNKS = parseDiffHunks(SAMPLE_DIFF); // src/db/x.ts: [10,13]
+const base = { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High' };
+
+test('validateFinding accepts a well-formed in-diff finding', () => {
+  assert.deepEqual(validateFinding({ ...base }, HUNKS), { ok: true });
+});
+test('validateFinding rejects out-of-diff line', () => {
+  assert.equal(validateFinding({ ...base, line: 99 }, HUNKS).reason, 'out-of-diff');
+});
+test('validateFinding rejects LEFT/other side', () => {
+  assert.equal(validateFinding({ ...base, side: 'LEFT' }, HUNKS).reason, 'side');
+});
+test('validateFinding rejects bad severity', () => {
+  assert.equal(validateFinding({ ...base, severity: 'Critical' }, HUNKS).reason, 'severity');
+});
+test('validateFinding rejects start_line >= line', () => {
+  assert.equal(validateFinding({ ...base, start_line: 11, line: 11 }, HUNKS).reason, 'range');
+});
+test('validateFinding rejects start_line out of diff', () => {
+  assert.equal(validateFinding({ ...base, start_line: 2, line: 11 }, HUNKS).reason, 'start-out-of-diff');
+});
+test('validateFinding accepts a valid multi-line range', () => {
+  assert.deepEqual(validateFinding({ ...base, start_line: 10, line: 12 }, HUNKS), { ok: true });
 });
