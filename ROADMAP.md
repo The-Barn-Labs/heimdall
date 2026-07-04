@@ -1,5 +1,25 @@
 # Roadmap & known limitations
 
+## Fixed issues (changelog)
+
+- **2026-07-04 — `cancel-in-progress` cancelled the real review on nearly every PR.** The concurrency
+  group is keyed by PR number regardless of trigger type, so *any* `issue_comment` is a new run
+  competing in the same group. Two rounds of this bug:
+  1. First fix (2026-07-03, PR #1580) only excluded `heim-dall[bot]`'s own actor
+     (`cancel-in-progress: ${{ github.actor != 'heim-dall[bot]' }}`) — correct for the self-trigger
+     case (the bot's own summary comment racing its own run), but not general enough.
+  2. **The real, general bug** (found 2026-07-04 verifying on a genuinely new PR, #1586): Gemini's
+     auto-comment — present on nearly *every* PR within seconds of opening — has a *different* actor
+     than the guard excluded, so it still evaluated `cancel-in-progress: true` and cancelled the real
+     `pull_request`-triggered review before it finished. Reproduced 100% of the time. Fixed by scoping
+     to genuine re-review requests, not just "not this bot":
+     `cancel-in-progress: ${{ github.event_name != 'issue_comment' || (contains(github.event.comment.body, '@heim-dall') && github.actor != 'heim-dall[bot]') }}`.
+  3. **Process lesson:** this bug was invisible to every `workflow_dispatch`-based test run during
+     initial development — it only manifested when triggered by a genuine `pull_request: opened` event
+     on a real PR, because only that path races against another bot's real auto-comment. Any future
+     change to trigger/concurrency logic must be verified by opening an actual PR, not just dispatching
+     against an existing one.
+
 ## Known limitations
 
 - **Re-reviews stack in the PR timeline.** De-spam cleans up *content* — stale inline comments are
@@ -33,9 +53,16 @@
    annotations auto-clear on new commits. Deferred at v1 (design spec §7.4).
 6. **A lightweight smoke-test harness for the workflow YAML itself.** Several of v1's real bugs
    (cross-repo caller-permissions requirement, `workflow_call` ref-resolution gap, the concurrency
-   self-cancel race) were invisible to `actionlint` and only surfaced via live dispatch against a real
-   repo. A scripted smoke test — a disposable throwaway caller + a trivial reusable workflow, driven
-   via `gh workflow run` + poll — could catch a regression before it reaches a real PR.
+   self-cancel race in both its forms) were invisible to `actionlint` and only surfaced via live
+   testing against a real repo. A scripted smoke test — a disposable throwaway caller + a trivial
+   reusable workflow, driven via `gh workflow run` + poll — could catch the permissions/ref-resolution
+   class of bug before it reaches a real PR. **Race conditions specifically need a genuine
+   `pull_request: opened` trigger, not `workflow_dispatch`** — the `cancel-in-progress` bug above was
+   invisible to every dispatch-based test and only manifested against a real PR racing another bot's
+   real auto-comment; a smoke test that only dispatches would give false confidence on this class of
+   bug.
+7. **Merge the `cancel-in-progress` fix** — pushed to `main`/`v1` here 2026-07-04; the corresponding
+   File Valet caller fix is open as file-valet#1586, not yet merged as of this writing.
 
 ## Where design work happens
 
