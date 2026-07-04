@@ -24,7 +24,7 @@ on:
 
 concurrency:
   group: ai-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: ${{ github.actor != 'heim-dall[bot]' }}
+  cancel-in-progress: ${{ github.event_name != 'issue_comment' || (contains(github.event.comment.body, '@heim-dall') && github.actor != 'heim-dall[bot]') }}
 
 permissions:
   contents: read
