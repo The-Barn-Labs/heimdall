@@ -189,9 +189,15 @@ jobs:
           COMMAND: ${{ steps.gate.outputs.command }}
         run: |
           set -euo pipefail
-          SENSITIVE_RE='^(src/db/|src/actions/|src/middleware|middleware\.ts|src/lib/auth|src/lib/services/.*[Aa]uth)|(^|[^a-zA-Z])rls([^a-zA-Z]|$)|step-up|better-auth'
+          # Match sensitive CHANGED FILE PATHS only — never the diff body. The
+          # previous regex ran over the whole diff, so a docs-only PR whose PROSE
+          # merely mentioned "rls"/"step-up"/"auth" (e.g. docs/INBOX.md triage
+          # logs, compliance notes) was escalated to the heavy sensitive model.
+          # Right-side paths come from the unified-diff '+++ b/<path>' headers.
+          SENSITIVE_PATH_RE='^(src/db/|src/actions/|src/middleware|src/lib/auth|src/lib/services/.*[Aa]uth)|(^|/)middleware\.ts$|(^|/)rls|step-up|better-auth'
+          CHANGED=$(grep -E '^\+\+\+ b/' pr-review.diff | sed 's#^\+\+\+ b/##' || true)
           MODEL="$REVIEW_MODEL_DEFAULT"; NOTE=""
-          if grep -Eq "$SENSITIVE_RE" pr-review.diff; then MODEL="$REVIEW_MODEL_SENSITIVE"; NOTE="escalated"; fi
+          if printf '%s\n' "$CHANGED" | grep -Eq "$SENSITIVE_PATH_RE"; then MODEL="$REVIEW_MODEL_SENSITIVE"; NOTE="escalated"; fi
           if [ "$COMMAND" = "review-deep" ]; then MODEL="$REVIEW_MODEL_SENSITIVE"; NOTE="deep"; fi
           echo "model=$MODEL" >> "$GITHUB_OUTPUT"
           echo "note=$NOTE" >> "$GITHUB_OUTPUT"
@@ -206,10 +212,10 @@ jobs:
         if: ${{ steps.gate.outputs.run == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.OPENCODE_GO_KEY }}
-          ANTHROPIC_MODEL: ${{ steps.engine.outputs.model }}
+          PRIMARY_MODEL: ${{ steps.engine.outputs.model }}
           PR: ${{ steps.gate.outputs.pr }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "::notice::no Go key (fork?); skipping."; exit 0; fi
           if [ ! -s pr-review.diff ]; then echo "empty diff; nothing to review."; exit 0; fi
           STYLE=""; [ -s styleguide.md ] && STYLE="Repo styleguide (authoritative, from base):\n$(cat styleguide.md)\n"
@@ -217,16 +223,63 @@ jobs:
           Output ONLY a single JSON object, no prose, no code fences, exactly:
           {\"summary\":\"markdown verdict + coverage + counts\",\"findings\":[{\"path\":\"<repo-relative>\",\"line\":<new-file RIGHT-side line>,\"start_line\":<optional, < line>,\"side\":\"RIGHT\",\"severity\":\"High|Medium|Low\",\"category\":\"<short>\",\"confidence\":\"High|Medium|Low\",\"body\":\"markdown; a \`\`\`suggestion block only if you are highly confident\"}]}
           Use new-file line numbers. Escape newlines and other control characters within string values as \\n etc — never a literal line break inside a string. If there are no issues, findings is []."
-          attempt=0; max=2; ok=false
-          while [ $attempt -lt $max ]; do
-            set +e
-            claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format json --max-turns 60 > raw.json 2> claude.err
-            code=$?
-            set -e
-            if [ $code -eq 0 ] && [ -s raw.json ] && [ "$(jq -r '.is_error // false' raw.json)" != "true" ]; then ok=true; break; fi
-            attempt=$((attempt+1)); [ $attempt -lt $max ] && sleep $((attempt*5))
+
+          # One claude -p invocation against a specific model. Returns 0 on a
+          # clean result, non-zero otherwise; leaves raw.json/claude.err on disk.
+          run_once () {
+            ANTHROPIC_MODEL="$1" claude -p "$PROMPT" --allowedTools "Read,Grep,Glob" --output-format json --max-turns 60 > raw.json 2> claude.err
+            local code=$?
+            [ $code -eq 0 ] && [ -s raw.json ] && [ "$(jq -r '.is_error // false' raw.json)" != "true" ]
+          }
+          # True when the last raw.json carried a 5xx from the Go inference
+          # gateway — a server-side outage, not a bad request. Retrying the SAME
+          # model is pointless (it hangs ~3 min then 503s again), so we break to
+          # the fallback model immediately instead of burning the retry budget.
+          is_5xx () {
+            local s; s=$(jq -r '.api_error_status // empty' raw.json 2>/dev/null)
+            [ -n "$s" ] && [ "$s" -ge 500 ] 2>/dev/null
+          }
+
+          # Try the chosen (possibly sensitive/heavy) model first; if it is
+          # unavailable, fall back to the always-on default model so a single
+          # model's outage does not red every sensitive PR. De-duped so a
+          # non-escalated review still runs exactly one model.
+          MODELS="$PRIMARY_MODEL"
+          [ "$PRIMARY_MODEL" != "$REVIEW_MODEL_DEFAULT" ] && MODELS="$PRIMARY_MODEL $REVIEW_MODEL_DEFAULT"
+          ok=false; USED=""
+          for m in $MODELS; do
+            for attempt in 1 2; do
+              if run_once "$m"; then ok=true; USED="$m"; break; fi
+              if is_5xx; then
+                echo "::warning::model '$m' returned $(jq -r '.api_error_status' raw.json) (server-side outage); not retrying this model"
+                break
+              fi
+              [ "$attempt" -lt 2 ] && sleep 10
+            done
+            $ok && break
+            [ "$m" != "$REVIEW_MODEL_DEFAULT" ] && echo "::warning::primary model '$m' unavailable; falling back to '$REVIEW_MODEL_DEFAULT'"
           done
-          if [ "$ok" != "true" ]; then echo "::error::claude failed after retries"; cat claude.err || true; exit 1; fi
+
+          if [ "$ok" != "true" ]; then
+            echo "::error::claude review failed on all candidate models ($MODELS)"
+            # Diagnostics: claude.err (stderr) usually holds only the benign
+            # "workspace not trusted" warning — the REAL failure (auth, API
+            # error, max-turns exhaustion, 5xx from the Go pool) lands in
+            # raw.json (stdout). Decode the meaningful fields, then the full
+            # stderr, so a CI failure is diagnosable without a live-log stakeout.
+            echo "::group::raw.json (decoded — last attempt stdout)"
+            jq -r '{is_error, type, subtype, num_turns, duration_ms, api_error_status, stop_reason, result}' raw.json 2>/dev/null \
+              || { echo "raw.json is not valid JSON; printing head:"; head -c 4000 raw.json; }
+            echo "::endgroup::"
+            echo "::group::claude.err (full stderr)"
+            cat claude.err || true
+            echo "::endgroup::"
+            exit 1
+          fi
+          if [ "$USED" != "$PRIMARY_MODEL" ]; then
+            echo "::notice::review completed on fallback model '$USED' (primary '$PRIMARY_MODEL' was unavailable)"
+          fi
+          echo "model_used=$USED" >> "$GITHUB_OUTPUT"
 
       - name: Build payload (tested module) or fall back
         id: build
