@@ -32,11 +32,11 @@ jobs:
     env:
       ANTHROPIC_BASE_URL: https://opencode.ai/zen/go
       ANTHROPIC_MODEL: qwen3.7-plus
-      ANTHROPIC_SMALL_FAST_MODEL: minimax-m2.5
+      ANTHROPIC_SMALL_FAST_MODEL: qwen3.7-plus
       ANTHROPIC_DEFAULT_OPUS_MODEL: qwen3.7-max
       ANTHROPIC_DEFAULT_SONNET_MODEL: qwen3.7-plus
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: minimax-m2.5
-      ANTHROPIC_DEFAULT_FABLE_MODEL: minimax-m3
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: qwen3.7-plus
+      ANTHROPIC_DEFAULT_FABLE_MODEL: qwen3.7-plus
       REVIEW_MODEL_DEFAULT: qwen3.7-plus
       REVIEW_MODEL_SENSITIVE: qwen3.7-max
     steps:
