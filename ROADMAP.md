@@ -63,6 +63,16 @@
    bug.
 7. **Merge the `cancel-in-progress` fix** — pushed to `main`/`v1` here 2026-07-04; the corresponding
    File Valet caller fix is open as file-valet#1586, not yet merged as of this writing.
+8. **Inline review with an empty top-level body + one upsertable summary comment.** Follow-up to the
+   duplicate-post fix (PR #3, 2026-07-08). That fix stopped the double-post by making the summary
+   issue-comment the `else` of the inline review — so in `inline` mode the rollup now lives *only* in
+   the review body. Because review objects can't be edited/upserted (see "Re-reviews stack" above),
+   the always-current single summary comment is lost on re-reviews in inline mode. The cleaner design:
+   post the inline review carrying only its line-anchored comments (empty/minimal top-level body), and
+   keep the single upsertable `<!-- ai-pr-review-go -->` summary comment as the human rollup on *both*
+   inline and fallback paths. Eliminates the duplicate **and** restores one always-current rollup,
+   partially mitigating the "Re-reviews stack" limitation. Needs a `build-review.mjs` change (empty the
+   review `body`), so it was deliberately out of scope for PR #3's minimal control-flow fix.
 
 ## Where design work happens
 
