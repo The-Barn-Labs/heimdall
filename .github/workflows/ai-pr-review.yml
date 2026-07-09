@@ -322,14 +322,24 @@ jobs:
             gh api graphql -f query='mutation($id:ID!){minimizeComment(input:{subjectId:$id,classifier:OUTDATED}){clientMutationId}}' -f id="$id" >/dev/null || true
           done
           if [ "$MODE" = "inline" ] && [ -s review.payload.json ]; then
+            # Inline review only. Its top-level body already carries the full
+            # summary (marker + rollup), so we must NOT also upsert the summary as
+            # a separate issue comment — that duplicated the review on every PR.
+            # The summary upsert below used to run UNCONDITIONALLY, and its dedup
+            # search over issues/{PR}/comments cannot see the review we just
+            # posted (a review lives under pulls/{PR}/reviews, a different
+            # surface), so `existing` was always empty in inline mode and the
+            # fallback posted a second, byte-identical copy.
             gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" --input review.payload.json >/dev/null
             echo "Posted inline review."
-          fi
-          # Upsert the summary comment (also carries folded findings / fallback body).
-          existing=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-            --jq "[.[] | select(.body | contains(\"${MARKER}\"))][0].id // empty")
-          if [ -n "$existing" ]; then
-            gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@review.summary.md" >/dev/null
           else
-            gh pr comment "$PR" --body-file review.summary.md
+            # Non-inline / fallback: upsert the single summary comment (also
+            # carries folded findings / fallback body).
+            existing=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+              --jq "[.[] | select(.body | contains(\"${MARKER}\"))][0].id // empty")
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/${REPO}/issues/comments/${existing}" -F "body=@review.summary.md" >/dev/null
+            else
+              gh pr comment "$PR" --body-file review.summary.md
+            fi
           fi
