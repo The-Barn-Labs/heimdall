@@ -114,14 +114,50 @@ const MARKER = '<!-- ai-pr-review-go -->';
 function stripSuggestion(body) {
   return body.replace(/```suggestion[\s\S]*?```/gi, '_(suggestion omitted — low confidence)_');
 }
-function oneLine(s) {
-  return (s || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+// Collapse to a single line for a preview. Cut on a word boundary (not
+// mid-word) and append an ellipsis when truncated, so the collapsed <summary>
+// never ends in a severed token. The preview sits inside <summary> (an HTML
+// context), so after truncating we strip backticks — a mid-span cut would
+// otherwise leave an unclosed code span that swallows the rest of the line —
+// and escape HTML-sensitive chars so a literal <Type> isn't parsed as a tag.
+// Sanitizing AFTER truncation (not before) guarantees we never sever an escape
+// entity like &lt; into a broken &l….
+function oneLine(s, max = 200) {
+  const flat = (s || '').replace(/\s+/g, ' ').trim();
+  let cut;
+  if (flat.length <= max) {
+    cut = flat;
+  } else {
+    const slice = flat.slice(0, max);
+    const lastSpace = slice.lastIndexOf(' ');
+    cut = (lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
+  }
+  return cut
+    .replace(/`/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 function renderCommentBody(f) {
   let b = f.body || '';
   if (f.confidence !== 'High') b = stripSuggestion(b);
   const cat = f.category ? ` ${f.category}` : '';
   return `**[${f.severity}]${cat}** — ${b}`;
+}
+// Folded findings fall outside the diff hunks GitHub accepts for inline review
+// comments, so the summary body is their ONLY surface. Render the FULL body
+// inside a collapsible <details> — the previous one-line preview hard-sliced
+// each finding at 200 chars, silently dropping its reasoning and suggested fix
+// (and cutting mid-word). The <summary> keeps a scannable severity/path header
+// plus a clean preview; the full text is one click away.
+function renderFoldedFinding(f) {
+  let b = f.body || '';
+  if (f.confidence !== 'High') b = stripSuggestion(b);
+  const cat = f.category ? ` ${f.category}` : '';
+  const header = `**[${f.severity}]${cat}** \`${f.path}:${f.line}\``;
+  const preview = oneLine(b);
+  const summaryText = preview ? `${header} — ${preview}` : header;
+  return `<details>\n<summary>${summaryText}</summary>\n\n${b}\n\n</details>`;
 }
 
 export function buildReviewPayload(parsed, hunks) {
@@ -144,8 +180,7 @@ export function buildReviewPayload(parsed, hunks) {
   if (folded.length) {
     body += `\n### Findings outside the diff\n`;
     for (const f of folded) {
-      const cat = f.category ? ` ${f.category}` : '';
-      body += `- **[${f.severity}]${cat}** \`${f.path}:${f.line}\` — ${oneLine(f.body)}\n`;
+      body += `\n${renderFoldedFinding(f)}\n`;
     }
   }
   return { body, event: 'COMMENT', comments };
