@@ -190,16 +190,30 @@ test('folded <summary> preview strips backticks and escapes HTML-sensitive chars
   // <Type> would otherwise break rendering.
   const parsed = { summary: 's', findings: [
     { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
-      body: 'guard `Array<string>` when value < 0 and value > 10' },
+      body: 'guard `Array<string>` when **value** < 0 and value > 10' },
   ]};
   const p = buildReviewPayload(parsed, HUNKS);
   const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
-  // The path in the header is a legit `code span`; scope checks to the preview
-  // (everything after the ' — ' separator).
   const preview = summaryLine.split(' — ')[1];
   assert.doesNotMatch(preview, /`/, 'backticks stripped from preview');
+  assert.doesNotMatch(preview, /\*/, 'emphasis asterisks stripped from preview');
   assert.doesNotMatch(preview, /<string>|< 0/, 'raw angle brackets escaped in preview');
   assert.match(preview, /&lt;string&gt;/, 'angle brackets rendered as entities');
+});
+
+test('folded <summary> is plain text — no markdown (GitHub renders none inside <summary>)', () => {
+  // Regression: markdown put inside <summary> renders as literal ** and backticks
+  // on GitHub. The summary must be plain; bold/code live in the body below it.
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'High', category: 'Security', confidence: 'High', body: 'RLS bypass in the handler.' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
+  assert.doesNotMatch(summaryLine, /\*\*/, 'no literal ** in <summary>');
+  assert.doesNotMatch(summaryLine, /`/, 'no literal backticks in <summary>');
+  assert.match(summaryLine, /\[High\] Security src\/db\/x\.ts:99/, 'plain severity/category/path present');
+  // full body still renders markdown (it is normal markdown below </summary>)
+  assert.match(p.body, /RLS bypass in the handler\./);
 });
 
 test('folded <summary> omits the separator when the body is empty', () => {
