@@ -138,6 +138,19 @@ test('validateFinding accepts a valid multi-line range', () => {
   assert.deepEqual(validateFinding({ ...base, start_line: 10, line: 12 }, HUNKS), { ok: true });
 });
 
+import { oneLine } from './build-review.mjs';
+
+test('oneLine does not chop the last char when max < 40 and there is no space', () => {
+  // max-40 goes negative; a no-space slice has lastSpace === -1, which must NOT
+  // satisfy the word-boundary branch (else the last real char is dropped).
+  const out = oneLine('abcdefghijklmnopqrstuvwxyz0123456789', 10); // no spaces, max 10
+  assert.equal(out, 'abcdefghij…', 'keeps all 10 chars + ellipsis, no boundary chop');
+});
+
+test('oneLine still cuts on a word boundary when one exists within budget', () => {
+  assert.equal(oneLine('alpha beta gamma delta', 12), 'alpha beta…');
+});
+
 import { buildReviewPayload } from './build-review.mjs';
 
 test('buildReviewPayload splits inline vs folded and keeps the marker', () => {
