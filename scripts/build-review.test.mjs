@@ -216,6 +216,16 @@ test('folded <summary> is plain text — no markdown (GitHub renders none inside
   assert.match(p.body, /RLS bypass in the handler\./);
 });
 
+test('folded <summary> escapes HTML-sensitive chars in the header', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/x<anon>.ts', line: 5, side: 'RIGHT', severity: 'Low', category: 'Gen<T>', confidence: 'Low', body: 'note' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
+  assert.doesNotMatch(summaryLine, /<anon>|<T>/, 'raw angle brackets escaped in header');
+  assert.match(summaryLine, /x&lt;anon&gt;\.ts/, 'header angle brackets rendered as entities');
+});
+
 test('folded <summary> omits the separator when the body is empty', () => {
   const parsed = { summary: 's', findings: [
     { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: '   ' },

@@ -165,7 +165,8 @@ function renderFoldedFinding(f) {
   // show up as literal asterisks/backticks. Keep the summary PLAIN TEXT
   // ("[Sev] category path:line — preview"); the full body below <summary> is
   // normal markdown and renders bold/code/fences correctly.
-  const header = `[${f.severity}]${cat} ${f.path}:${f.line}`;
+  const header = `[${f.severity}]${cat} ${f.path}:${f.line}`
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const preview = oneLine(b);
   const summaryText = preview ? `${header} — ${preview}` : header;
   return `<details>\n<summary>${summaryText}</summary>\n\n${b}\n\n</details>`;
