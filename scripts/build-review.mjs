@@ -122,7 +122,7 @@ function stripSuggestion(body) {
 // and escape HTML-sensitive chars so a literal <Type> isn't parsed as a tag.
 // Sanitizing AFTER truncation (not before) guarantees we never sever an escape
 // entity like &lt; into a broken &l….
-function oneLine(s, max = 200) {
+export function oneLine(s, max = 200) {
   const flat = (s || '').replace(/\s+/g, ' ').trim();
   let cut;
   if (flat.length <= max) {
@@ -130,7 +130,11 @@ function oneLine(s, max = 200) {
   } else {
     const slice = flat.slice(0, max);
     const lastSpace = slice.lastIndexOf(' ');
-    cut = (lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
+    // Guard lastSpace !== -1: with a small max, `max - 40` goes negative and a
+    // no-space slice (lastSpace === -1) would satisfy `-1 > max-40` and chop the
+    // last real char. Unreachable at the default max=200, but robust if callers
+    // ever pass a smaller budget.
+    cut = (lastSpace !== -1 && lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
   }
   return cut
     .replace(/`/g, '')
