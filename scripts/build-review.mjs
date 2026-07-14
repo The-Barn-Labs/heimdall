@@ -116,13 +116,27 @@ function stripSuggestion(body) {
 }
 // Collapse to a single line for a preview. Cut on a word boundary (not
 // mid-word) and append an ellipsis when truncated, so the collapsed <summary>
-// never ends in a severed token.
+// never ends in a severed token. The preview sits inside <summary> (an HTML
+// context), so after truncating we strip backticks — a mid-span cut would
+// otherwise leave an unclosed code span that swallows the rest of the line —
+// and escape HTML-sensitive chars so a literal <Type> isn't parsed as a tag.
+// Sanitizing AFTER truncation (not before) guarantees we never sever an escape
+// entity like &lt; into a broken &l….
 function oneLine(s, max = 200) {
   const flat = (s || '').replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  const slice = flat.slice(0, max);
-  const lastSpace = slice.lastIndexOf(' ');
-  return (lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
+  let cut;
+  if (flat.length <= max) {
+    cut = flat;
+  } else {
+    const slice = flat.slice(0, max);
+    const lastSpace = slice.lastIndexOf(' ');
+    cut = (lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
+  }
+  return cut
+    .replace(/`/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 function renderCommentBody(f) {
   let b = f.body || '';
@@ -141,7 +155,9 @@ function renderFoldedFinding(f) {
   if (f.confidence !== 'High') b = stripSuggestion(b);
   const cat = f.category ? ` ${f.category}` : '';
   const header = `**[${f.severity}]${cat}** \`${f.path}:${f.line}\``;
-  return `<details>\n<summary>${header} — ${oneLine(b)}</summary>\n\n${b}\n\n</details>`;
+  const preview = oneLine(b);
+  const summaryText = preview ? `${header} — ${preview}` : header;
+  return `<details>\n<summary>${summaryText}</summary>\n\n${b}\n\n</details>`;
 }
 
 export function buildReviewPayload(parsed, hunks) {

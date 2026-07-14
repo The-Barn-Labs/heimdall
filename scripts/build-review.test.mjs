@@ -172,6 +172,33 @@ test('buildReviewPayload preserves the FULL body of a folded (out-of-diff) findi
   assert.match(p.body, /src\/db\/x\.ts:99/, 'header keeps severity/path for scanning');
 });
 
+test('folded <summary> preview strips backticks and escapes HTML-sensitive chars', () => {
+  // The preview sits inside <summary>; a truncated code span or a literal
+  // <Type> would otherwise break rendering.
+  const parsed = { summary: 's', findings: [
+    { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
+      body: 'guard `Array<string>` when value < 0 and value > 10' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
+  // The path in the header is a legit `code span`; scope checks to the preview
+  // (everything after the ' — ' separator).
+  const preview = summaryLine.split(' — ')[1];
+  assert.doesNotMatch(preview, /`/, 'backticks stripped from preview');
+  assert.doesNotMatch(preview, /<string>|< 0/, 'raw angle brackets escaped in preview');
+  assert.match(preview, /&lt;string&gt;/, 'angle brackets rendered as entities');
+});
+
+test('folded <summary> omits the separator when the body is empty', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: '   ' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
+  assert.doesNotMatch(summaryLine, /—/, 'no trailing em-dash separator on empty body');
+  assert.match(summaryLine, /src\/x\.ts:99/, 'header still present');
+});
+
 test('buildReviewPayload strips a suggestion block from a non-High folded finding', () => {
   const parsed = { summary: 's', findings: [
     { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
