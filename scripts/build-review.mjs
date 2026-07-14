@@ -137,7 +137,10 @@ export function oneLine(s, max = 200) {
     cut = (lastSpace !== -1 && lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
   }
   return cut
-    .replace(/`/g, '')
+    // Strip inline-markdown markers: the preview lands in a <summary> where they
+    // render literally (ugly `**bold**`), and a truncated pair would leave an
+    // unclosed marker. Backtick + asterisk are what this bot actually emits.
+    .replace(/[`*]/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
@@ -158,7 +161,12 @@ function renderFoldedFinding(f) {
   let b = f.body || '';
   if (f.confidence !== 'High') b = stripSuggestion(b);
   const cat = f.category ? ` ${f.category}` : '';
-  const header = `**[${f.severity}]${cat}** \`${f.path}:${f.line}\``;
+  // GitHub renders NO markdown inside <summary> — `**bold**` and `` `code` ``
+  // show up as literal asterisks/backticks. Keep the summary PLAIN TEXT
+  // ("[Sev] category path:line — preview"); the full body below <summary> is
+  // normal markdown and renders bold/code/fences correctly.
+  const header = `[${f.severity}]${cat} ${f.path}:${f.line}`
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const preview = oneLine(b);
   const summaryText = preview ? `${header} — ${preview}` : header;
   return `<details>\n<summary>${summaryText}</summary>\n\n${b}\n\n</details>`;
