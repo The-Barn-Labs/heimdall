@@ -156,6 +156,32 @@ test('buildReviewPayload splits inline vs folded and keeps the marker', () => {
   assert.match(p.body, /Findings outside the diff/);
   assert.match(p.body, /src\/db\/x\.ts:99/);
 });
+test('buildReviewPayload preserves the FULL body of a folded (out-of-diff) finding', () => {
+  // Folded findings have no inline comment to carry their text, so the summary
+  // must not truncate them. Regression guard for the 200-char mid-word slice
+  // that silently dropped reasoning + suggested fixes.
+  const longBody =
+    'Staff cross-group exposure. ' + 'x'.repeat(400) + ' END-OF-FINDING-SENTINEL';
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: longBody },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 0, 'out-of-diff finding is folded, not inline');
+  assert.match(p.body, /END-OF-FINDING-SENTINEL/, 'full body survives — no truncation');
+  assert.match(p.body, /<details>/, 'folded finding rendered in a collapsible block');
+  assert.match(p.body, /src\/db\/x\.ts:99/, 'header keeps severity/path for scanning');
+});
+
+test('buildReviewPayload strips a suggestion block from a non-High folded finding', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
+      body: 'consider\n```suggestion\nconst x = 1;\n```' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.doesNotMatch(p.body, /```suggestion/);
+  assert.match(p.body, /suggestion omitted/);
+});
+
 test('buildReviewPayload strips a suggestion block when confidence is not High', () => {
   const parsed = { summary: 's', findings: [
     { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'Low', confidence: 'Low',

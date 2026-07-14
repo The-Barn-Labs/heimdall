@@ -114,14 +114,34 @@ const MARKER = '<!-- ai-pr-review-go -->';
 function stripSuggestion(body) {
   return body.replace(/```suggestion[\s\S]*?```/gi, '_(suggestion omitted — low confidence)_');
 }
-function oneLine(s) {
-  return (s || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+// Collapse to a single line for a preview. Cut on a word boundary (not
+// mid-word) and append an ellipsis when truncated, so the collapsed <summary>
+// never ends in a severed token.
+function oneLine(s, max = 200) {
+  const flat = (s || '').replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  const slice = flat.slice(0, max);
+  const lastSpace = slice.lastIndexOf(' ');
+  return (lastSpace > max - 40 ? slice.slice(0, lastSpace) : slice) + '…';
 }
 function renderCommentBody(f) {
   let b = f.body || '';
   if (f.confidence !== 'High') b = stripSuggestion(b);
   const cat = f.category ? ` ${f.category}` : '';
   return `**[${f.severity}]${cat}** — ${b}`;
+}
+// Folded findings fall outside the diff hunks GitHub accepts for inline review
+// comments, so the summary body is their ONLY surface. Render the FULL body
+// inside a collapsible <details> — the previous one-line preview hard-sliced
+// each finding at 200 chars, silently dropping its reasoning and suggested fix
+// (and cutting mid-word). The <summary> keeps a scannable severity/path header
+// plus a clean preview; the full text is one click away.
+function renderFoldedFinding(f) {
+  let b = f.body || '';
+  if (f.confidence !== 'High') b = stripSuggestion(b);
+  const cat = f.category ? ` ${f.category}` : '';
+  const header = `**[${f.severity}]${cat}** \`${f.path}:${f.line}\``;
+  return `<details>\n<summary>${header} — ${oneLine(b)}</summary>\n\n${b}\n\n</details>`;
 }
 
 export function buildReviewPayload(parsed, hunks) {
@@ -144,8 +164,7 @@ export function buildReviewPayload(parsed, hunks) {
   if (folded.length) {
     body += `\n### Findings outside the diff\n`;
     for (const f of folded) {
-      const cat = f.category ? ` ${f.category}` : '';
-      body += `- **[${f.severity}]${cat}** \`${f.path}:${f.line}\` — ${oneLine(f.body)}\n`;
+      body += `\n${renderFoldedFinding(f)}\n`;
     }
   }
   return { body, event: 'COMMENT', comments };
