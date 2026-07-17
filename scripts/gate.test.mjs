@@ -46,6 +46,11 @@ test('isReleaseTrain does NOT match a title merely mentioning a promotion', () =
   assert.equal(isReleaseTrain({ title: 'ci(staging): add served-vs-promoted commit gate on push' }), false);
   // Anchored: the word must START the title.
   assert.equal(isReleaseTrain({ title: 'fix: do not promote stale artifacts' }), false);
+  // The convention is "promote:" / "Promote " specifically. A hyphen or slash
+  // after the word is ordinary work, not a release train (PR #10 review).
+  assert.equal(isReleaseTrain({ title: 'promote-feature-flag: add X' }), false);
+  assert.equal(isReleaseTrain({ title: 'promote/api-version bump' }), false);
+  assert.equal(isReleaseTrain({ title: 'Promoted staging to main' }), false);
 });
 
 test('isReleaseTrain matches a PR from a long-lived integration branch', () => {
@@ -63,6 +68,9 @@ test('isReleaseTrain matches a PR from a long-lived integration branch', () => {
 test('isReleaseTrain tolerates missing/blank facts', () => {
   assert.equal(isReleaseTrain({}), false);
   assert.equal(isReleaseTrain(), false);
+  // null is not undefined, so a `= {}` default would NOT cover it and the
+  // destructure would throw (PR #10 review).
+  assert.equal(isReleaseTrain(null), false);
   assert.equal(isReleaseTrain({ title: undefined, headRef: null }), false);
 });
 

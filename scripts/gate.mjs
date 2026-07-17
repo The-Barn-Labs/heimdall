@@ -25,13 +25,19 @@ const RELEASE_TRAIN_HEADS = new Set(['dev', 'develop', 'staging']);
 // those would review fine, but the convention is "promotions are not review
 // surfaces". The escape hatch is explicit intent — see classifyTrigger, where
 // an `@heim-dall review` comment or a workflow_dispatch still runs in full.
-export function isReleaseTrain({ title, headRef } = {}) {
-  // ANCHORED, and \b-terminated. A title that merely mentions a promotion
-  // ("docs(inbox): triage 2026-07-14 — promote 4 items to dev",
+export function isReleaseTrain(ctx) {
+  if (!ctx) return false;
+  const { title, headRef } = ctx;
+  // ANCHORED, and terminated by a colon or whitespace — i.e. exactly the
+  // convention "promote:" / "Promote ". A title that merely mentions a
+  // promotion ("docs(inbox): triage 2026-07-14 — promote 4 items to dev",
   // "ci(staging): add served-vs-promoted commit gate") is ordinary work that
-  // must still be reviewed; only a title that *starts* "promote:" / "Promote "
-  // is the release-train convention. \b also stops "Promoted ..." matching.
-  if (typeof title === 'string' && /^\s*promote\b/i.test(title)) return true;
+  // must still be reviewed.
+  //
+  // [:\s] rather than \b: \b is satisfied by ANY non-word char, so it also
+  // matched "promote-feature-flag: ..." and "promote/api-version ..." — real
+  // PRs that would then be silently skipped (PR #10 review).
+  if (typeof title === 'string' && /^\s*promote[:\s]/i.test(title)) return true;
   if (typeof headRef === 'string' && RELEASE_TRAIN_HEADS.has(headRef.trim())) return true;
   return false;
 }
