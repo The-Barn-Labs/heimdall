@@ -91,6 +91,15 @@ jobs:
           IS_FORK=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.repo.full_name != .base.repo.full_name')
           HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')
           BASE=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.base.ref')
+          # Shape facts for the release-train skip (see gate.mjs isReleaseTrain).
+          # EXPORTED, not bare assignments: an unexported shell var is not in the
+          # environment of the node child below, so `process.env.PR_TITLE` would
+          # silently read `undefined` and the skip would never fire. PR_TITLE is
+          # attacker-controllable, so it reaches node ONLY via the environment —
+          # never interpolated into the script source.
+          PR_TITLE=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.title')
+          HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.ref')
+          export PR_TITLE HEAD_REF
           # Pure decision from the tested module.
           DECISION=$(node -e '
             import("./.heimdall/scripts/gate.mjs").then(g => {
@@ -100,6 +109,8 @@ jobs:
                 isPullRequestComment: process.env.IS_PR_COMMENT === "true",
                 isFork: process.env.IS_FORK === "true",
                 commentBody: process.env.COMMENT_BODY || "",
+                title: process.env.PR_TITLE || "",
+                headRef: process.env.HEAD_REF || "",
               });
               process.stdout.write(JSON.stringify(d));
             })' )
@@ -107,6 +118,12 @@ jobs:
           COMMAND=$(echo "$DECISION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).command')
           REASON=$(echo "$DECISION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).reason')
           echo "gate reason=$REASON run=$RUN command=$COMMAND"
+          # Explain a release-train skip in the run log. Deliberately NOT a PR
+          # comment: posting one needs the privileged App token, which is minted
+          # only for runs the gate authorized — a skipped run must not mint one.
+          if [ "$REASON" = "release-train" ]; then
+            echo "::notice::promote/release-train PR — skipping the full review; these commits were already reviewed on their way into the integration branch. Comment '@heim-dall review' to force one anyway."
+          fi
           # Authorization for the comment-command path only.
           if [ "$EVENT_NAME" = "issue_comment" ] && [ "$RUN" = "true" ]; then
             PERM=$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null || echo none)

@@ -26,7 +26,88 @@ test('parseCommand ignores unrelated mentions', () => {
   assert.equal(parseCommand('@someone-else review'), null);
 });
 
-import { classifyTrigger, isAuthorized } from './gate.mjs';
+import { classifyTrigger, isAuthorized, isReleaseTrain } from './gate.mjs';
+
+// Fixtures are REAL file-valet PR titles, so a convention drift shows up here.
+test('isReleaseTrain matches the promote-title convention', () => {
+  // #1797, #808, #1230
+  assert.equal(isReleaseTrain({ title: 'promote: dev → staging (2026-07-17) — Client Groups, Audit dashboard' }), true);
+  assert.equal(isReleaseTrain({ title: 'promote: staging → main (2026-06-11)' }), true);
+  // #1446, #1448, #1463 — capitalized, no colon
+  assert.equal(isReleaseTrain({ title: 'Promote dev → staging' }), true);
+  assert.equal(isReleaseTrain({ title: 'Promote staging → main (production)' }), true);
+});
+
+test('isReleaseTrain does NOT match a title merely mentioning a promotion', () => {
+  // #1743 and #1506 — ordinary PRs that must still be reviewed.
+  assert.equal(isReleaseTrain({ title: 'docs(inbox): triage 2026-07-14 — promote 4 items to dev' }), false);
+  assert.equal(isReleaseTrain({ title: 'docs(inbox): clear triage batch (promoted 6 captures)' }), false);
+  // #1620 — "promoted" inside the title, not the convention.
+  assert.equal(isReleaseTrain({ title: 'ci(staging): add served-vs-promoted commit gate on push' }), false);
+  // Anchored: the word must START the title.
+  assert.equal(isReleaseTrain({ title: 'fix: do not promote stale artifacts' }), false);
+  // The convention is "promote:" / "Promote " specifically. A hyphen or slash
+  // after the word is ordinary work, not a release train (PR #10 review).
+  assert.equal(isReleaseTrain({ title: 'promote-feature-flag: add X' }), false);
+  assert.equal(isReleaseTrain({ title: 'promote/api-version bump' }), false);
+  assert.equal(isReleaseTrain({ title: 'Promoted staging to main' }), false);
+});
+
+test('isReleaseTrain matches a PR from a long-lived integration branch', () => {
+  assert.equal(isReleaseTrain({ headRef: 'dev' }), true);
+  assert.equal(isReleaseTrain({ headRef: 'staging' }), true);
+  assert.equal(isReleaseTrain({ headRef: 'develop' }), true);
+  // Feature branches are normal work.
+  assert.equal(isReleaseTrain({ headRef: 'fix/large-pr-diff-406' }), false);
+  assert.equal(isReleaseTrain({ headRef: 'feat/client-groups' }), false);
+  // Substring of an integration branch name is not a match.
+  assert.equal(isReleaseTrain({ headRef: 'dev-tools' }), false);
+  assert.equal(isReleaseTrain({ headRef: 'feature/staging-fix' }), false);
+});
+
+test('isReleaseTrain tolerates missing/blank facts', () => {
+  assert.equal(isReleaseTrain({}), false);
+  assert.equal(isReleaseTrain(), false);
+  // null is not undefined, so a `= {}` default would NOT cover it and the
+  // destructure would throw (PR #10 review).
+  assert.equal(isReleaseTrain(null), false);
+  assert.equal(isReleaseTrain({ title: undefined, headRef: null }), false);
+});
+
+test('pull_request on a promote PR is SKIPPED (release-train)', () => {
+  const r = classifyTrigger({
+    eventName: 'pull_request', action: 'opened',
+    title: 'promote: dev → staging (2026-07-17)', headRef: 'dev',
+  });
+  assert.equal(r.run, false); assert.equal(r.reason, 'release-train');
+});
+
+test('pull_request on an ordinary PR still runs', () => {
+  const r = classifyTrigger({
+    eventName: 'pull_request', action: 'opened',
+    title: 'fix(review): capture diff locally', headRef: 'fix/large-pr-diff-406',
+  });
+  assert.equal(r.run, true); assert.equal(r.reason, 'pr-event');
+});
+
+// The escape hatch: the skip is for AUTOMATIC triggers only. A human who asks
+// for a promote review by name has opted in and must still get one.
+test('explicit @heim-dall review on a promote PR STILL runs', () => {
+  const r = classifyTrigger({
+    eventName: 'issue_comment', isPullRequestComment: true, isFork: false,
+    commentBody: '@heim-dall review',
+    title: 'promote: dev → staging (2026-07-17)', headRef: 'dev',
+  });
+  assert.equal(r.run, true); assert.equal(r.command, 'review');
+});
+
+test('workflow_dispatch on a promote PR STILL runs', () => {
+  const r = classifyTrigger({
+    eventName: 'workflow_dispatch',
+    title: 'promote: dev → staging (2026-07-17)', headRef: 'dev',
+  });
+  assert.equal(r.run, true); assert.equal(r.command, 'review');
+});
 
 test('workflow_dispatch always runs a review', () => {
   const r = classifyTrigger({ eventName: 'workflow_dispatch' });
