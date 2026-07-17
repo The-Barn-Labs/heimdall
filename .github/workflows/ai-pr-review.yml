@@ -174,7 +174,42 @@ jobs:
             echo "::notice::head advanced ($HEAD_SHA -> $LIVE); reviewing the pinned SHA the requester saw."
           fi
           git checkout --force "$HEAD_SHA"
-          gh pr diff "$PR" > pr-review.diff
+
+          # Diff LOCALLY rather than via `gh pr diff`. The API's diff endpoint
+          # hard-fails with HTTP 406 ("the diff exceeded the maximum number of
+          # files (300)") on any large PR — a promote/release-train PR trips it
+          # every time — killing the run in ~17s before a single review step
+          # gets to look at anything (observed on file-valet #1797: 453 files).
+          # The compare endpoint still returns the merge base at ANY size, so
+          # resolve it there, fetch that one commit shallowly, and diff the two
+          # trees locally. `git diff A B` compares trees only — it never walks
+          # history — so a depth-1 fetch of each side is sufficient; the two
+          # shallow tips need no common ancestry in the local clone.
+          MERGE_BASE=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${BASE}...${HEAD_SHA}" --jq '.merge_base_commit.sha')
+          git fetch origin "$MERGE_BASE" --depth=1
+
+          # Generated artifacts are pure context burn: on file-valet #1797 the
+          # Drizzle meta snapshots plus the lockfile were ~28k of 83k diff
+          # lines, none of it reviewable. Excluding WHOLE files keeps per-file
+          # hunk line numbers intact, so build-review.mjs's diff->hunk mapping
+          # (and thus inline comment placement) is unaffected.
+          # ':(exclude,glob)' — the `glob` magic is REQUIRED for a leading '**/'
+          # to also match at the repo root. Without it a root-level
+          # package-lock.json silently survives the exclude (verified on #1797).
+          git diff "$MERGE_BASE" "$HEAD_SHA" -- . \
+            ':(exclude,glob)**/migrations/meta/**' \
+            ':(exclude,glob)**/__snapshots__/**' \
+            ':(exclude,glob)**/*.snap' \
+            ':(exclude,glob)**/package-lock.json' \
+            ':(exclude,glob)**/pnpm-lock.yaml' \
+            ':(exclude,glob)**/yarn.lock' \
+            ':(exclude,glob)**/bun.lockb' \
+            ':(exclude,glob)**/go.sum' \
+            ':(exclude,glob)**/Cargo.lock' \
+            ':(exclude,glob)**/poetry.lock' \
+            ':(exclude,glob)**/composer.lock' \
+            > pr-review.diff
+
           git show "origin/${BASE}:.ai-review/styleguide.md" > styleguide.md 2>/dev/null || : > styleguide.md
           echo "diff_lines=$(wc -l < pr-review.diff)"
 
