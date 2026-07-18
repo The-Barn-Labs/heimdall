@@ -1,0 +1,28 @@
+# .github/workflows/tests.yml
+# Runs heimdall's own unit tests. This matters more than usual because the
+# reusable reviewer checks out its scripts from `ref: main` at runtime
+# (ai-pr-review.yml), so a broken build-review.mjs / gate.mjs on main breaks
+# review for EVERY caller in the org — not just one PR. This gate keeps main
+# green before that can happen.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No package.json / deps — these are dependency-free node:test suites.
+      - name: Run unit tests
+        run: node --test scripts/*.test.mjs

@@ -151,6 +151,43 @@ function renderCommentBody(f) {
   const cat = f.category ? ` ${f.category}` : '';
   return `**[${f.severity}]${cat}** — ${b}`;
 }
+// Pick a line GitHub will definitely accept for an inline comment, so a finding
+// whose true location is not in the diff can still be posted as a RESOLVABLE
+// review thread (folded prose is not — a required thread-resolution ruleset
+// can't gate on it). Prefer the finding's OWN file (right file, just a line
+// outside the diff hunks); fall back to the first changed file in the diff.
+// `hunks` is a Map in diff order, so the fallback is deterministic. Returns
+// null only when the diff has no commentable line anywhere — then fold.
+export function pickAnchor(hunks, preferredPath) {
+  const firstLine = (ranges) => (ranges && ranges.length ? ranges[0][0] : null);
+  const own = firstLine(hunks.get(preferredPath));
+  if (own !== null) return { path: preferredPath, line: own, sameFile: true };
+  for (const [path, ranges] of hunks) {
+    const line = firstLine(ranges);
+    if (line !== null) return { path, line, sameFile: false };
+  }
+  return null;
+}
+// A well-formed finding GitHub can't anchor at its true location, re-homed onto
+// an in-diff line (the `anchor`) so it becomes a resolvable thread. A banner
+// names the real location; ANY ```suggestion block is stripped unconditionally
+// — "Apply suggestion" would patch the anchor line, which is the wrong line by
+// construction (unlike renderCommentBody, which keeps High-confidence
+// suggestions because there the comment sits on the correct line).
+function renderRelocatedBody(f, anchor) {
+  const where = anchor.sameFile
+    ? `line ${f.line} of \`${f.path}\`, which falls outside this PR's diff hunks`
+    : `\`${f.path}:${f.line}\`, which has no line in this PR's diff to anchor to`;
+  const banner =
+    `> ⚠️ **This comment is really about ${where}.** ` +
+    `GitHub can't anchor it there, so it's pinned to this line only to stay a resolvable thread.`;
+  const stripped = (f.body || '').replace(
+    /```suggestion[\s\S]*?```/gi,
+    '_(suggestion omitted — this comment is pinned to a different line than the finding)_',
+  );
+  const cat = f.category ? ` ${f.category}` : '';
+  return `${banner}\n\n**[${f.severity}]${cat}** — ${stripped}`;
+}
 // Folded findings fall outside the diff hunks GitHub accepts for inline review
 // comments, so the summary body is their ONLY surface. Render the FULL body
 // inside a collapsible <details> — the previous one-line preview hard-sliced
@@ -173,8 +210,27 @@ function renderFoldedFinding(f) {
 }
 
 export function buildReviewPayload(parsed, hunks) {
-  const comments = [];
   const folded = [];
+  // Collect comments keyed by their (path, line). GitHub's review-thread
+  // validation is finicky about two comments sharing a position in one payload,
+  // and a single bad entry 422s the ENTIRE review — losing every finding. This
+  // happens for real: when several findings relocate to the same fallback
+  // anchor (e.g. two findings on files absent from the diff — file-valet #1806),
+  // they'd otherwise stack on one line. Merge same-position comments into a
+  // single thread instead; the first entry keeps its positional fields (range
+  // and all), later bodies are appended under a rule.
+  const byPos = new Map();
+  const order = [];
+  const addComment = (c) => {
+    const key = `${c.path} ${c.line}`;
+    const existing = byPos.get(key);
+    if (existing) {
+      existing.body += `\n\n---\n\n${c.body}`;
+    } else {
+      byPos.set(key, c);
+      order.push(key);
+    }
+  };
   for (const f of parsed.findings) {
     const v = validateFinding(f, hunks);
     if (v.ok) {
@@ -183,11 +239,26 @@ export function buildReviewPayload(parsed, hunks) {
         c.start_line = f.start_line;
         c.start_side = 'RIGHT';
       }
-      comments.push(c);
+      addComment(c);
+    } else if (v.reason === 'out-of-diff' || v.reason === 'start-out-of-diff') {
+      // Well-formed finding, just not anchorable at its true location (line
+      // outside the diff hunks, or the file isn't in the diff at all). Re-home
+      // it onto a proven in-diff line so it posts as a resolvable review thread
+      // instead of ignorable folded prose. Fold only as a last resort, when the
+      // diff exposes no commentable line anywhere (guards against a whole-review
+      // 422 from an invalid anchor).
+      const anchor = pickAnchor(hunks, f.path);
+      if (anchor) {
+        addComment({ path: anchor.path, line: anchor.line, side: 'RIGHT', body: renderRelocatedBody(f, anchor) });
+      } else {
+        folded.push(f);
+      }
     } else {
+      // Malformed (bad shape/side/severity/range) — untrustworthy on any line.
       folded.push(f);
     }
   }
+  const comments = order.map((k) => byPos.get(k));
   let body = `${MARKER}\n\n## 🤖 AI Code Review (Go)\n\n${parsed.summary}\n`;
   if (folded.length) {
     body += `\n### Findings outside the diff\n`;

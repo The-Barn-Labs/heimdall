@@ -114,6 +114,7 @@ test('isCommentable is true inside a hunk, false outside', () => {
 });
 
 const HUNKS = parseDiffHunks(SAMPLE_DIFF); // src/db/x.ts: [10,13]
+const NO_HUNKS = new Map(); // a diff with no commentable line -> findings fold
 const base = { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High' };
 
 test('validateFinding accepts a well-formed in-diff finding', () => {
@@ -153,7 +154,7 @@ test('oneLine still cuts on a word boundary when one exists within budget', () =
 
 import { buildReviewPayload } from './build-review.mjs';
 
-test('buildReviewPayload splits inline vs folded and keeps the marker', () => {
+test('buildReviewPayload relocates an out-of-diff finding to a resolvable thread', () => {
   const parsed = {
     summary: 'Looks mostly good.',
     findings: [
@@ -163,26 +164,90 @@ test('buildReviewPayload splits inline vs folded and keeps the marker', () => {
   };
   const p = buildReviewPayload(parsed, HUNKS);
   assert.equal(p.event, 'COMMENT');
-  assert.equal(p.comments.length, 1);
-  assert.equal(p.comments[0].line, 11);
+  // Both findings are now posted as review threads: one truly inline, one
+  // re-homed onto an in-diff line. Neither folds, so merge-gating on thread
+  // resolution applies to both.
+  assert.equal(p.comments.length, 2);
+  assert.equal(p.comments[0].line, 11, 'in-diff finding stays on its real line');
+  const relocated = p.comments[1];
+  assert.equal(relocated.line, 10, 'out-of-diff finding anchored to the file\'s first hunk line');
+  assert.equal(relocated.side, 'RIGHT');
+  assert.match(relocated.body, /really about line 99 of/, 'banner names the real line');
   assert.match(p.body, /^<!-- ai-pr-review-go -->/);
-  assert.match(p.body, /Findings outside the diff/);
-  assert.match(p.body, /src\/db\/x\.ts:99/);
+  assert.doesNotMatch(p.body, /Findings outside the diff/, 'nothing folded when an anchor exists');
 });
-test('buildReviewPayload preserves the FULL body of a folded (out-of-diff) finding', () => {
-  // Folded findings have no inline comment to carry their text, so the summary
-  // must not truncate them. Regression guard for the 200-char mid-word slice
-  // that silently dropped reasoning + suggested fixes.
+test('buildReviewPayload preserves the FULL body of a relocated finding', () => {
+  // The relocated inline comment carries the finding's text, so nothing is
+  // truncated. Regression guard for the old 200-char mid-word fold slice.
   const longBody =
     'Staff cross-group exposure. ' + 'x'.repeat(400) + ' END-OF-FINDING-SENTINEL';
   const parsed = { summary: 's', findings: [
     { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: longBody },
   ]};
   const p = buildReviewPayload(parsed, HUNKS);
-  assert.equal(p.comments.length, 0, 'out-of-diff finding is folded, not inline');
-  assert.match(p.body, /END-OF-FINDING-SENTINEL/, 'full body survives — no truncation');
+  assert.equal(p.comments.length, 1, 'out-of-diff finding is relocated, not folded');
+  assert.match(p.comments[0].body, /END-OF-FINDING-SENTINEL/, 'full body survives — no truncation');
+});
+test('buildReviewPayload folds an out-of-diff finding only when no anchor exists', () => {
+  // With an empty diff (no commentable line anywhere) there is nowhere safe to
+  // pin the comment, so it falls back to the folded summary block.
+  const longBody = 'Staff cross-group exposure. ' + 'x'.repeat(400) + ' END-OF-FINDING-SENTINEL';
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: longBody },
+  ]};
+  const p = buildReviewPayload(parsed, NO_HUNKS);
+  assert.equal(p.comments.length, 0, 'no anchor -> folded, not inline');
+  assert.match(p.body, /END-OF-FINDING-SENTINEL/, 'full body survives in the fold');
   assert.match(p.body, /<details>/, 'folded finding rendered in a collapsible block');
   assert.match(p.body, /src\/db\/x\.ts:99/, 'header keeps severity/path for scanning');
+});
+test('buildReviewPayload relocates a finding on a file absent from the diff to the first changed file', () => {
+  const parsed = { summary: 's', findings: [
+    { path: '.github/workflows/_mutation.yml', line: 109, side: 'RIGHT', severity: 'Medium', category: 'CI', confidence: 'High', body: 'Missing MIGRATE_APPLY_ALL=1.' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 1);
+  assert.equal(p.comments[0].path, 'src/db/x.ts', 'anchored to the first changed file in the diff');
+  assert.equal(p.comments[0].line, 10);
+  assert.match(p.comments[0].body, /no line in this PR's diff to anchor to/, 'banner explains the file has no anchorable line');
+  assert.match(p.comments[0].body, /_mutation\.yml:109/, 'banner names the real path:line');
+});
+test('buildReviewPayload merges findings that resolve to the same anchor into one thread (file-valet #1806 shape)', () => {
+  // Two findings on files ABSENT from the diff both fall back to the first
+  // changed file's first hunk line. They must NOT post as two comments on the
+  // same (path, line) — that risks a whole-review 422 — but merge into one
+  // resolvable thread carrying both.
+  const parsed = { summary: 's', findings: [
+    { path: '.github/workflows/_mutation.yml', line: 109, side: 'RIGHT', severity: 'Medium', category: 'CI', confidence: 'High', body: 'Missing MIGRATE_APPLY_ALL on _mutation.' },
+    { path: '.github/workflows/ci-hosted-runner-trial.yml', line: 148, side: 'RIGHT', severity: 'Low', category: 'CI', confidence: 'High', body: 'Missing MIGRATE_APPLY_ALL on trial.' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 1, 'both relocate to the same line -> a single merged comment');
+  assert.equal(p.comments[0].path, 'src/db/x.ts');
+  assert.equal(p.comments[0].line, 10);
+  assert.match(p.comments[0].body, /_mutation\.yml:109/, 'first finding present');
+  assert.match(p.comments[0].body, /ci-hosted-runner-trial\.yml:148/, 'second finding present');
+  assert.match(p.comments[0].body, /\n---\n/, 'findings separated by a rule');
+});
+test('buildReviewPayload keeps distinct-position findings as separate comments', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'a' },
+    { path: 'src/db/x.ts', line: 12, side: 'RIGHT', severity: 'Low', confidence: 'Low', body: 'b' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 2, 'different lines never merge');
+});
+test('buildReviewPayload strips a suggestion block from a relocated finding regardless of confidence', () => {
+  // The comment is pinned to the wrong line by construction, so "Apply
+  // suggestion" would patch the anchor line. High confidence must NOT save it.
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'High', confidence: 'High',
+      body: 'fix\n```suggestion\nconst x = 1;\n```' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 1);
+  assert.doesNotMatch(p.comments[0].body, /```suggestion/, 'suggestion stripped even at High confidence');
+  assert.match(p.comments[0].body, /suggestion omitted/);
 });
 
 test('folded <summary> preview strips backticks and escapes HTML-sensitive chars', () => {
@@ -192,7 +257,7 @@ test('folded <summary> preview strips backticks and escapes HTML-sensitive chars
     { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
       body: 'guard `Array<string>` when **value** < 0 and value > 10' },
   ]};
-  const p = buildReviewPayload(parsed, HUNKS);
+  const p = buildReviewPayload(parsed, NO_HUNKS);
   const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
   const preview = summaryLine.split(' — ')[1];
   assert.doesNotMatch(preview, /`/, 'backticks stripped from preview');
@@ -207,7 +272,7 @@ test('folded <summary> is plain text — no markdown (GitHub renders none inside
   const parsed = { summary: 's', findings: [
     { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'High', category: 'Security', confidence: 'High', body: 'RLS bypass in the handler.' },
   ]};
-  const p = buildReviewPayload(parsed, HUNKS);
+  const p = buildReviewPayload(parsed, NO_HUNKS);
   const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
   assert.doesNotMatch(summaryLine, /\*\*/, 'no literal ** in <summary>');
   assert.doesNotMatch(summaryLine, /`/, 'no literal backticks in <summary>');
@@ -220,7 +285,7 @@ test('folded <summary> escapes HTML-sensitive chars in the header', () => {
   const parsed = { summary: 's', findings: [
     { path: 'src/x<anon>.ts', line: 5, side: 'RIGHT', severity: 'Low', category: 'Gen<T>', confidence: 'Low', body: 'note' },
   ]};
-  const p = buildReviewPayload(parsed, HUNKS);
+  const p = buildReviewPayload(parsed, NO_HUNKS);
   const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
   assert.doesNotMatch(summaryLine, /<anon>|<T>/, 'raw angle brackets escaped in header');
   assert.match(summaryLine, /x&lt;anon&gt;\.ts/, 'header angle brackets rendered as entities');
@@ -230,7 +295,7 @@ test('folded <summary> omits the separator when the body is empty', () => {
   const parsed = { summary: 's', findings: [
     { path: 'src/x.ts', line: 99, side: 'RIGHT', severity: 'Medium', category: 'Security', confidence: 'High', body: '   ' },
   ]};
-  const p = buildReviewPayload(parsed, HUNKS);
+  const p = buildReviewPayload(parsed, NO_HUNKS);
   const summaryLine = p.body.split('\n').find((l) => l.startsWith('<summary>'));
   assert.doesNotMatch(summaryLine, /—/, 'no trailing em-dash separator on empty body');
   assert.match(summaryLine, /src\/x\.ts:99/, 'header still present');
@@ -241,7 +306,7 @@ test('buildReviewPayload strips a suggestion block from a non-High folded findin
     { path: 'src/db/x.ts', line: 99, side: 'RIGHT', severity: 'Low', confidence: 'Low',
       body: 'consider\n```suggestion\nconst x = 1;\n```' },
   ]};
-  const p = buildReviewPayload(parsed, HUNKS);
+  const p = buildReviewPayload(parsed, NO_HUNKS);
   assert.doesNotMatch(p.body, /```suggestion/);
   assert.match(p.body, /suggestion omitted/);
 });
