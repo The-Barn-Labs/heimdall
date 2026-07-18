@@ -1,0 +1,48 @@
+# .github/workflows/tests.yml
+# Runs heimdall's own unit tests. This matters more than usual because the
+# reusable reviewer checks out its scripts from `ref: main` at runtime
+# (ai-pr-review.yml), so a broken build-review.mjs / gate.mjs on main breaks
+# review for EVERY caller in the org — not just one PR. This gate keeps main
+# green before that can happen.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  node-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No package.json / deps — these are dependency-free node:test suites.
+      - name: Run unit tests
+        run: node --test scripts/*.test.mjs
+
+  # Lint the workflows themselves. The reviewer's post/gate logic lives in bash
+  # inside ai-pr-review.yml; actionlint also runs shellcheck over those `run:`
+  # blocks, so a broken edit to the very step that posts inline comments fails
+  # here instead of silently degrading a live review to a plain-text fallback.
+  # Pinned to the version this repo develops against; a bad tag fails loudly.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          VERSION=1.7.12
+          curl -fsSL --retry 3 -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          tar xzf actionlint.tar.gz actionlint
+      - name: Lint workflows
+        run: ./actionlint -color
