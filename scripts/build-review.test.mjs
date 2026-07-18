@@ -237,6 +237,45 @@ test('buildReviewPayload keeps distinct-position findings as separate comments',
   const p = buildReviewPayload(parsed, HUNKS);
   assert.equal(p.comments.length, 2, 'different lines never merge');
 });
+test('buildReviewPayload posts a start-out-of-diff finding INLINE on its real line when that line is in the diff', () => {
+  // start_line is above the hunk (invalid range) but f.line is inside it. This
+  // must become a single-line inline comment on the real line — NOT a relocated
+  // comment on a different line with a false "outside the diff" banner.
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', start_line: 2, line: 11, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'range bug' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS); // src/db/x.ts hunk [10,13]
+  assert.equal(p.comments.length, 1);
+  assert.equal(p.comments[0].line, 11, 'commented on the real line, not an anchor');
+  assert.equal(p.comments[0].start_line, undefined, 'invalid range dropped -> single-line');
+  assert.doesNotMatch(p.comments[0].body, /really about|outside this PR's diff/, 'no false relocation banner');
+});
+
+test('buildReviewPayload relocates a start-out-of-diff finding only when its real line is also out of diff', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/db/x.ts', start_line: 2, line: 99, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'both out' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 1);
+  assert.equal(p.comments[0].line, 10, 'anchored, since line 99 is not in the diff');
+  assert.match(p.comments[0].body, /really about/, 'relocation banner present');
+});
+
+test('buildReviewPayload makes a real finding the PRIMARY when a relocated finding collides on its line', () => {
+  // A finding on a file absent from the diff relocates to the first changed
+  // file's first hunk line (10). A genuine finding also sits on line 10. The
+  // real finding must lead the merged thread, not be buried under the banner.
+  const parsed = { summary: 's', findings: [
+    { path: 'absent.ts', line: 5, side: 'RIGHT', severity: 'Medium', confidence: 'High', body: 'RELOCATED-FINDING' },
+    { path: 'src/db/x.ts', line: 10, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'REAL-FINDING' },
+  ]};
+  const p = buildReviewPayload(parsed, HUNKS);
+  assert.equal(p.comments.length, 1, 'both land on line 10 -> one merged thread');
+  const body = p.comments[0].body;
+  assert.ok(body.indexOf('REAL-FINDING') < body.indexOf('RELOCATED-FINDING'), 'real finding leads the thread');
+  assert.doesNotMatch(body.split('---')[0], /really about/, 'thread does not open with a relocation banner');
+});
+
 test('buildReviewPayload strips a suggestion block from a relocated finding regardless of confidence', () => {
   // The comment is pinned to the wrong line by construction, so "Apply
   // suggestion" would patch the anchor line. High confidence must NOT save it.

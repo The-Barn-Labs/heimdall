@@ -231,22 +231,43 @@ export function buildReviewPayload(parsed, hunks) {
       order.push(key);
     }
   };
-  for (const f of parsed.findings) {
+  // Classify once. A finding posts as a REAL inline comment when it is fully
+  // valid, OR when only its multi-line start_line falls outside the diff while
+  // the finding's own line IS in the diff — that just means dropping the range
+  // and commenting on the single real line. It must NOT be relocated with a
+  // "this is really about another line" banner, which would be false: the line
+  // is right there in the diff.
+  const classified = parsed.findings.map((f) => {
     const v = validateFinding(f, hunks);
-    if (v.ok) {
-      const c = { path: f.path, line: f.line, side: 'RIGHT', body: renderCommentBody(f) };
-      if (f.start_line !== undefined && f.start_line !== null) {
-        c.start_line = f.start_line;
-        c.start_side = 'RIGHT';
-      }
-      addComment(c);
-    } else if (v.reason === 'out-of-diff' || v.reason === 'start-out-of-diff') {
-      // Well-formed finding, just not anchorable at its true location (line
-      // outside the diff hunks, or the file isn't in the diff at all). Re-home
-      // it onto a proven in-diff line so it posts as a resolvable review thread
-      // instead of ignorable folded prose. Fold only as a last resort, when the
-      // diff exposes no commentable line anywhere (guards against a whole-review
-      // 422 from an invalid anchor).
+    const asRealInline = v.ok || (v.reason === 'start-out-of-diff' && isCommentable(hunks, f.path, f.line));
+    return { f, v, asRealInline };
+  });
+
+  // Pass 1: real inline comments first, so a genuine in-diff finding is always
+  // the PRIMARY of any merged thread — a relocated finding that collides on the
+  // same line is appended beneath it, never the other way around (which would
+  // mislabel the real finding under a relocation banner).
+  for (const { f, v, asRealInline } of classified) {
+    if (!asRealInline) continue;
+    const c = { path: f.path, line: f.line, side: 'RIGHT', body: renderCommentBody(f) };
+    // Keep the range only when the whole range is valid; a start-out-of-diff
+    // finding is downgraded to a single-line comment on its real line.
+    if (v.ok && f.start_line !== undefined && f.start_line !== null) {
+      c.start_line = f.start_line;
+      c.start_side = 'RIGHT';
+    }
+    addComment(c);
+  }
+
+  // Pass 2: findings GitHub can't anchor at their true location (line outside
+  // the diff hunks, or the file isn't in the diff at all). Re-home each onto a
+  // proven in-diff line so it still posts as a resolvable review thread instead
+  // of ignorable folded prose. Fold only as a last resort, when the diff
+  // exposes no commentable line anywhere (guards against a whole-review 422 from
+  // an invalid anchor).
+  for (const { f, v, asRealInline } of classified) {
+    if (asRealInline) continue;
+    if (v.reason === 'out-of-diff' || v.reason === 'start-out-of-diff') {
       const anchor = pickAnchor(hunks, f.path);
       if (anchor) {
         addComment({ path: anchor.path, line: anchor.line, side: 'RIGHT', body: renderRelocatedBody(f, anchor) });
