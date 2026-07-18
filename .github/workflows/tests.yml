@@ -26,3 +26,23 @@ jobs:
       # No package.json / deps — these are dependency-free node:test suites.
       - name: Run unit tests
         run: node --test scripts/*.test.mjs
+
+  # Lint the workflows themselves. The reviewer's post/gate logic lives in bash
+  # inside ai-pr-review.yml; actionlint also runs shellcheck over those `run:`
+  # blocks, so a broken edit to the very step that posts inline comments fails
+  # here instead of silently degrading a live review to a plain-text fallback.
+  # Pinned to the version this repo develops against; a bad tag fails loudly.
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          VERSION=1.7.12
+          curl -sSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          tar xzf actionlint.tar.gz actionlint
+      - name: Lint workflows
+        run: ./actionlint -color

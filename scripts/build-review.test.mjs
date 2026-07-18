@@ -354,3 +354,164 @@ test('runCli writes a payload + summary from raw + diff', () => {
   assert.equal(payload.comments.length, 1);
   assert.match(readFileSync(join(dir, 'summary.md'), 'utf8'), /ai-pr-review-go/);
 });
+
+// --- parseDiffHunks against real-diff shapes -----------------------------
+// Regression guards for hunk parsing on diffs like file-valet #1806: mis-parse
+// here silently mis-routes findings (a valid line looks out-of-diff -> folded
+// to plain text, or an out-of-diff line looks valid -> 422s the whole review).
+
+test('parseDiffHunks captures MULTIPLE hunks in one file', () => {
+  // ci-hosted-runner-trial.yml in #1806 had three separate hunks.
+  const diff = `diff --git a/m.yml b/m.yml
+--- a/m.yml
++++ b/m.yml
+@@ -145,6 +145,10 @@ jobs:
+ ctx
++added
+@@ -249,6 +253,10 @@ jobs:
+ ctx
++added
+@@ -377,6 +385,10 @@ jobs:
+ ctx
++added
+`;
+  const h = parseDiffHunks(diff);
+  assert.deepEqual(h.get('m.yml'), [[145, 154], [253, 262], [385, 394]]);
+});
+
+test('parseDiffHunks keys an ADDED file (--- /dev/null) so its findings can be inline', () => {
+  // #1806 added scripts/__tests__/migrate-holdback.test.ts. A finding on a new
+  // file MUST be commentable inline, not folded — the +++ b/ side is real.
+  const diff = `diff --git a/new.ts b/new.ts
+new file mode 100644
+--- /dev/null
++++ b/new.ts
+@@ -0,0 +1,3 @@
++one
++two
++three
+`;
+  const h = parseDiffHunks(diff);
+  assert.deepEqual(h.get('new.ts'), [[1, 3]]);
+  assert.equal(isCommentable(h, 'new.ts', 2), true);
+});
+
+test('parseDiffHunks is not corrupted by a "No newline at end of file" marker', () => {
+  const diff = `diff --git a/a.ts b/a.ts
+--- a/a.ts
++++ b/a.ts
+@@ -1,2 +1,2 @@
+-old
++new
+\\ No newline at end of file
+`;
+  const h = parseDiffHunks(diff);
+  assert.deepEqual(h.get('a.ts'), [[1, 2]]);
+});
+
+// --- end-to-end: a realistic mixed result posts INLINE, not plain text ----
+// This is the closest guard to the reported production failure: findings that
+// should be inline review comments instead rendered as a plain-text summary.
+
+const MIXED_DIFF = `diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -10,2 +10,3 @@ ctx
+ keep
++added
+ keep
+diff --git a/src/b.ts b/src/b.ts
+--- a/src/b.ts
++++ b/src/b.ts
+@@ -5,1 +5,2 @@ ctx
+ keep
++added
+`;
+
+test('runCli turns a realistic mixed result into inline comments, not a folded text dump', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rev-'));
+  const raw = JSON.stringify({ is_error: false, result: JSON.stringify({
+    summary: 'Verdict: 3 findings.',
+    findings: [
+      // in-diff -> a true inline comment on its own line
+      { path: 'src/a.ts', line: 11, side: 'RIGHT', severity: 'High', category: 'Security', confidence: 'High', body: 'RLS bypass.' },
+      // two files absent from the diff -> relocate + merge onto the first changed file
+      { path: '.github/workflows/_mutation.yml', line: 109, side: 'RIGHT', severity: 'Medium', category: 'CI', confidence: 'High', body: 'Missing MIGRATE_APPLY_ALL.' },
+      { path: '.github/workflows/ci-hosted-runner-trial.yml', line: 148, side: 'RIGHT', severity: 'Low', category: 'CI', confidence: 'High', body: 'Same latent bug.' },
+    ],
+  })});
+  writeFileSync(join(dir, 'raw.json'), raw);
+  writeFileSync(join(dir, 'pr.diff'), MIXED_DIFF);
+  runCli(join(dir, 'raw.json'), join(dir, 'pr.diff'), join(dir, 'payload.json'), join(dir, 'summary.md'));
+  const payload = JSON.parse(readFileSync(join(dir, 'payload.json'), 'utf8'));
+  const summary = readFileSync(join(dir, 'summary.md'), 'utf8');
+
+  assert.equal(payload.event, 'COMMENT');
+  assert.equal(payload.comments.length, 2, 'one real inline + one merged relocated thread');
+  assert.equal(payload.comments[0].line, 11, 'in-diff finding stays inline on its real line');
+  assert.equal(payload.comments[1].line, 10, 'relocated findings anchored to the first changed file');
+  assert.match(payload.comments[1].body, /_mutation\.yml:109/);
+  assert.match(payload.comments[1].body, /ci-hosted-runner-trial\.yml:148/);
+  // Nothing should have fallen back into the plain-text "outside the diff" block.
+  assert.doesNotMatch(summary, /Findings outside the diff/, 'no plain-text fold when everything is anchorable');
+});
+
+test('runCli THROWS on malformed model output so the workflow can fall back to a summary', () => {
+  // The workflow's bash relies on a non-zero exit here to switch from an inline
+  // review to a plain-text summary comment. If build-review ever stopped
+  // throwing, a garbage result would post as an empty/broken review instead.
+  const dir = mkdtempSync(join(tmpdir(), 'rev-'));
+  writeFileSync(join(dir, 'raw.json'), JSON.stringify({ is_error: false, result: 'I was unable to comply.' }));
+  writeFileSync(join(dir, 'pr.diff'), SAMPLE_DIFF);
+  assert.throws(() =>
+    runCli(join(dir, 'raw.json'), join(dir, 'pr.diff'), join(dir, 'payload.json'), join(dir, 'summary.md')),
+  );
+});
+
+test('runCli THROWS when the envelope reports is_error', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rev-'));
+  writeFileSync(join(dir, 'raw.json'), JSON.stringify({ is_error: true, result: '{"summary":"x","findings":[]}' }));
+  writeFileSync(join(dir, 'pr.diff'), SAMPLE_DIFF);
+  assert.throws(() =>
+    runCli(join(dir, 'raw.json'), join(dir, 'pr.diff'), join(dir, 'payload.json'), join(dir, 'summary.md')),
+  );
+});
+
+// --- payload API-safety invariant ----------------------------------------
+// Whatever findings arrive, the posted payload must never contain a shape the
+// GitHub reviews API rejects (a single bad entry 422s the ENTIRE review). This
+// asserts the guarantees structurally, over an adversarial finding set.
+
+function assertPayloadApiSafe(payload) {
+  const seen = new Set();
+  for (const c of payload.comments) {
+    assert.equal(typeof c.path, 'string', 'comment.path is a string');
+    assert.ok(Number.isInteger(c.line), 'comment.line is an integer');
+    assert.equal(c.side, 'RIGHT', 'comment.side is RIGHT');
+    assert.ok(typeof c.body === 'string' && c.body.length > 0, 'comment.body is non-empty');
+    assert.ok(!('subject_type' in c), 'no unsupported subject_type field');
+    if (c.start_line !== undefined) {
+      assert.ok(Number.isInteger(c.start_line) && c.start_line < c.line, 'valid start_line < line');
+      assert.equal(c.start_side, 'RIGHT');
+    }
+    const key = `${c.path} ${c.line}`;
+    assert.ok(!seen.has(key), `no duplicate position ${key}`);
+    seen.add(key);
+  }
+}
+
+test('buildReviewPayload output is API-safe against an adversarial finding set', () => {
+  const parsed = { summary: 's', findings: [
+    { path: 'src/a.ts', line: 11, side: 'RIGHT', severity: 'High', confidence: 'High', body: 'valid inline' },
+    { path: 'src/a.ts', line: 999, side: 'RIGHT', severity: 'Low', confidence: 'Low', body: 'out of diff -> relocated' },
+    { path: 'gone/absent.ts', line: 5, side: 'RIGHT', severity: 'Medium', confidence: 'High', body: 'absent file -> relocated' },
+    { path: 'gone/absent2.ts', line: 7, side: 'RIGHT', severity: 'Medium', confidence: 'High', body: 'absent file 2 -> same anchor, must merge not duplicate' },
+    { path: 'src/a.ts', line: 'nope', side: 'RIGHT', severity: 'High', confidence: 'High', body: 'malformed line -> folded' },
+    { path: 'src/a.ts', line: 11, side: 'LEFT', severity: 'High', confidence: 'High', body: 'bad side -> folded' },
+  ]};
+  const hunks = parseDiffHunks(MIXED_DIFF); // src/a.ts:[10,12], src/b.ts:[5,6]
+  const p = buildReviewPayload(parsed, hunks);
+  assertPayloadApiSafe(p);
+  // And no relocated comment carries an applyable suggestion pinned to the wrong line.
+  for (const c of p.comments) assert.doesNotMatch(c.body, /```suggestion/);
+});
